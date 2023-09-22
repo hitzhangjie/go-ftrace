@@ -54,7 +54,7 @@ func NewTracer(bin string, excludeVendor bool, uprobeWildcards, fetch []string) 
 	}, nil
 }
 
-// Parse parse the args `gofuncgraph [flags] binary <args>`
+// Parse parse the args `ftrace [flags] binary <args>`
 //
 // @return out: the function names to output
 // @return fetch: the function name => parameters (parameter name => parameter value)

@@ -13,24 +13,24 @@ import (
 )
 
 type Event struct {
-	bpf.GofuncgraphEvent
+	bpf.GoftraceEvent
 	uprobe    *uprobe.Uprobe
 	argString string
 }
 
 type EventManager struct {
 	elf     *elf.ELF
-	argCh   <-chan bpf.GofuncgraphArgData
+	argCh   <-chan bpf.GoftraceArgData
 	uprobes map[string]uprobe.Uprobe
 
 	goEvents     map[uint64][]Event
 	goEventStack map[uint64]uint64
-	goArgs       map[uint64]chan bpf.GofuncgraphArgData
+	goArgs       map[uint64]chan bpf.GoftraceArgData
 
 	bootTime time.Time
 }
 
-func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GofuncgraphArgData) (_ *EventManager, err error) {
+func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GoftraceArgData) (_ *EventManager, err error) {
 	host, err := sysinfo.Host()
 	if err != nil {
 		return
@@ -46,7 +46,7 @@ func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GofuncgraphArgData
 		uprobes:      uprobesMap,
 		goEvents:     map[uint64][]Event{},
 		goEventStack: map[uint64]uint64{},
-		goArgs:       map[uint64]chan bpf.GofuncgraphArgData{},
+		goArgs:       map[uint64]chan bpf.GoftraceArgData{},
 		bootTime:     bootTime,
 	}
 	go m.handleArg()
@@ -56,14 +56,14 @@ func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GofuncgraphArgData
 func (m *EventManager) handleArg() {
 	for arg := range m.argCh {
 		if _, ok := m.goArgs[arg.Goid]; !ok {
-			m.goArgs[arg.Goid] = make(chan bpf.GofuncgraphArgData, 1000)
+			m.goArgs[arg.Goid] = make(chan bpf.GoftraceArgData, 1000)
 		}
 		log.Debugf("add arg %+v", arg)
 		m.goArgs[arg.Goid] <- arg
 	}
 }
 
-func (m *EventManager) GetUprobe(event bpf.GofuncgraphEvent) (_ uprobe.Uprobe, err error) {
+func (m *EventManager) GetUprobe(event bpf.GoftraceEvent) (_ uprobe.Uprobe, err error) {
 	syms, offset, err := m.elf.ResolveAddress(event.Ip)
 	if err != nil {
 		return

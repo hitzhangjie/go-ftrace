@@ -10,21 +10,36 @@ go-ftrace is an bpf(2)-based ftrace(1)-like function graph tracer for Golang pro
 
 # Usage
 
-```
-   example: trace a specific function in etcd client "go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire"
-     ftrace -u 'go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire' ./a.out
+`examples/main.go` is provided for testing, try following tracing tests:
 
-   example: trace all functions in etcd client
-     ftrace -u 'go.etcd.io/etcd/client/v3/*' ./a.out
+  ```
+  example: trace a specific function: "main.add":
+    ftrace -u main.add ./main
 
-   example: trace a specific function and include runtime.chan* builtins
-     ftrace -u 'go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire' 'runtime.chan*' ./a.out
+  example: trace all functions like main.add*:
+    ftrace -u 'main.add*' ./main
 
-   example: trace a specific function with some arguemnts
-     ftrace -u 'go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire(pfx=+0(+8(%ax)):c512, n_pfx=+16(%ax):u64, m.s.id=16(0(%ax)):u64)' ./a.out
-```
+  example: trace all functions like main.add* or main.minus*:
+    ftrace -u 'main.add*' -u 'main.minus*' ./main
+
+  example: trace a specific function and include runtime.chan* builtins:
+    ftrace -u 'main.add' -u 'runtime.chan*' ./main
+
+  example: trace a specific method of specific type:
+    ftrace -u 'main.(*Student).String ./main    
+
+  example: trace a specific method of specific type, and fetch its arguemnts:
+    ftrace -u 'main.(*Student).String' ./main \
+      'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+  ```
+
+`examples/Makefile` is provided, you can run `make <target>` to quickly test it.
+
+ps: Tracing with ftrace can be done either before or after launching ./main, both approaches will work.
 
 # Installation
+
+## Method 1
 
 install into your $GOBIN or $GOPATH/bin, please add $GOBIN, $GOPATH/bin to your PATH
 
@@ -45,6 +60,10 @@ then we can run it with sudo:
 sudo ftrace -u 'go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire' ./a.out
 ```
 
+## Method 2
+
+Also, `Makefile` is provided, run `make && make install` is enough.
+
 # Use cases
 
 - Wall time profiling;
@@ -52,6 +71,6 @@ sudo ftrace -u 'go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire' ./a.o
 
 # Acknowledgments
 
-This repo is forked from [jschwinger233/gofuncgraph](https://github.com/jschwinger233/gofuncgraph), with some modifications to improve usability. 
+This repo is forked from [jschwinger233/gofuncgraph](https://github.com/jschwinger233/gofuncgraph), with some modifications to improve usability and fix the bugs of fetching arguments. 
 
 Thanks for the original work!

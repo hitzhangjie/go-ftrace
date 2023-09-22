@@ -8,12 +8,12 @@
 #define ENTPOINT 0
 #define RETPOINT 1
 
-#define fsbase_off (offsetof(struct task_struct, thread) \
-		    + offsetof(struct thread_struct, fsbase))
+#define fsbase_off (offsetof(struct task_struct, thread) + offsetof(struct thread_struct, fsbase))
 
 char __license[] SEC("license") = "Dual MIT/GPL";
 
-struct config {
+struct config
+{
 	__s64 goid_offset;
 	__s64 g_offset;
 	bool fetch_args;
@@ -22,7 +22,8 @@ struct config {
 
 static volatile const struct config CONFIG = {};
 
-struct event {
+struct event
+{
 	__u64 goid;
 	__u64 ip;
 	__u64 bp;
@@ -35,22 +36,26 @@ struct event {
 // force emitting struct event into the ELF.
 const struct event *_ __attribute__((unused));
 
-struct arg_rule {
+struct arg_rule
+{
 	__u8 type;
 	__u8 reg;
 	__u8 size;
 	__u8 length;
 	__s16 offsets[8];
+	__u8 deference[8];
 };
 
-struct arg_rules {
+struct arg_rules
+{
 	__u8 length;
 	struct arg_rule rules[8];
 };
 
 const struct arg_rules *__ __attribute__((unused));
 
-struct arg_data {
+struct arg_data
+{
 	__u64 goid;
 	__u8 data[MAX_DATA_SIZE];
 };
@@ -107,20 +112,21 @@ struct bpf_map_def SEC("maps") should_trace_rip = {
 };
 
 static __always_inline
-__u64 get_goid()
+	__u64
+	get_goid()
 {
 	__u64 tls_base, g_addr, goid;
 	struct task_struct *task = (struct task_struct *)bpf_get_current_task();
 	bpf_probe_read_kernel(&tls_base, sizeof(tls_base), (void *)task + fsbase_off);
-	bpf_probe_read_user(&g_addr, sizeof(g_addr), (void *)(tls_base+CONFIG.g_offset));
-	bpf_probe_read_user(&goid, sizeof(goid), (void *)(g_addr+CONFIG.goid_offset));
+	bpf_probe_read_user(&g_addr, sizeof(g_addr), (void *)(tls_base + CONFIG.g_offset));
+	bpf_probe_read_user(&goid, sizeof(goid), (void *)(g_addr + CONFIG.goid_offset));
 	return goid;
 }
 
-static __always_inline
-void read_reg(struct pt_regs *ctx, __u8 reg, __u64 *regval)
+static __always_inline void read_reg(struct pt_regs *ctx, __u8 reg, __u64 *regval)
 {
-	switch (reg) {
+	switch (reg)
+	{
 	case 0:
 		bpf_probe_read_kernel(regval, sizeof(ctx->ax), &ctx->ax);
 		break;
@@ -173,34 +179,37 @@ void read_reg(struct pt_regs *ctx, __u8 reg, __u64 *regval)
 	return;
 }
 
-static __always_inline
-void fetch_args_from_reg(struct pt_regs *ctx, struct arg_data *data, struct arg_rule *rule)
+static __always_inline void fetch_args_from_reg(struct pt_regs *ctx, struct arg_data *data, struct arg_rule *rule)
 {
 	read_reg(ctx, rule->reg, (__u64 *)&data->data);
 	bpf_map_push_elem(&arg_queue, data, BPF_EXIST);
 	return;
 }
 
-static __always_inline
-void fetch_args_from_memory(struct pt_regs *ctx, struct arg_data *data, struct arg_rule *rule)
+static __always_inline void fetch_args_from_memory(struct pt_regs *ctx, struct arg_data *data, struct arg_rule *rule)
 {
 	__u64 addr = 0;
 	read_reg(ctx, rule->reg, &addr);
 
-	for (int i = 0; i < 8; i++) {
-		if (i == rule->length - 1)
-			break;
-		bpf_probe_read_user(&addr, sizeof(addr), (void *)addr+rule->offsets[i]);
+	for (int i = 0; i < 8 && i < rule->length; i++)
+	{
+		if (rule->deference[i] == 1)
+		{
+			bpf_probe_read_user(&addr, sizeof(addr), (void *)addr + rule->offsets[i]);
+		}
+		else
+		{
+			addr += rule->offsets[i];
+		}
 	}
 	bpf_probe_read_user(&data->data,
-			    rule->size < MAX_DATA_SIZE ? rule->size : MAX_DATA_SIZE,
-			    (void *)addr);
+						rule->size < MAX_DATA_SIZE ? rule->size : MAX_DATA_SIZE,
+						(void *)addr);
 	bpf_map_push_elem(&arg_queue, data, BPF_EXIST);
 	return;
 }
 
-static __always_inline
-void fetch_args(struct pt_regs *ctx, __u64 goid, __u64 ip)
+static __always_inline void fetch_args(struct pt_regs *ctx, __u64 goid, __u64 ip)
 {
 	struct arg_rules *rules = bpf_map_lookup_elem(&arg_rules_map, &ip);
 	if (!rules)
@@ -214,10 +223,10 @@ void fetch_args(struct pt_regs *ctx, __u64 goid, __u64 ip)
 	__builtin_memset(data, 0, sizeof(*data));
 	data->goid = goid;
 
-	for (int i = 0; i < 8; i++) {
-		if (rules->length == i)
-			break;
-		switch (rules->rules[i].type) {
+	for (int i = 0; i < 8 && i < rules->length; i++)
+	{
+		switch (rules->rules[i].type)
+		{
 		case 0:
 			fetch_args_from_reg(ctx, data, &rules->rules[i]);
 			break;
@@ -239,14 +248,16 @@ int ent(struct pt_regs *ctx)
 
 	e->goid = get_goid();
 	e->ip = ctx->ip;
-	if (!bpf_map_lookup_elem(&should_trace_rip, &e->ip)) {
+	if (!bpf_map_lookup_elem(&should_trace_rip, &e->ip))
+	{
 		if (!bpf_map_lookup_elem(&should_trace_goid, &e->goid))
 			return 0;
-
-	} else if (!bpf_map_lookup_elem(&should_trace_goid, &e->goid)) {
+	}
+	else if (!bpf_map_lookup_elem(&should_trace_goid, &e->goid))
+	{
 		__u64 should_trace = true;
 		bpf_map_update_elem(&should_trace_goid, &e->goid, &should_trace,
-				    BPF_ANY);
+							BPF_ANY);
 	}
 
 	e->location = ENTPOINT;
@@ -255,7 +266,7 @@ int ent(struct pt_regs *ctx)
 	e->caller_bp = ctx->bp;
 
 	void *ra;
-	ra = (void*)ctx->sp;
+	ra = (void *)ctx->sp;
 	bpf_probe_read_user(&e->caller_ip, sizeof(e->caller_ip), ra);
 
 	if (!CONFIG.fetch_args)

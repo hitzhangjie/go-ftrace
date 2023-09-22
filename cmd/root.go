@@ -27,17 +27,24 @@ var usageLong = `go-ftrace is an eBPF(2)-based ftrace(1)-like function graph tra
 
 here're some tracing examples:
 
-1 trace a specific function in etcd client "go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire"
-  ftrace --uprobe-wildcards 'go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire' ./a.out
+  example: trace a specific function: "main.add":
+    ftrace -u main.add ./main
 
-2 trace all functions in etcd client
-  ftrace --uprobe-wildcards 'go.etcd.io/etcd/client/v3/*' ./a.out
+  example: trace all functions like main.add*:
+    ftrace -u 'main.add*' ./main
 
-3 trace a specific function and include runtime.chan* builtins
-  ftrace -u 'go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire' -u 'runtime.chan*' ./a.out
+  example: trace all functions like main.add* or main.minus*:
+    ftrace -u 'main.add*' -u 'main.minus*' ./main
 
-4 trace a specific function with some arguemnts
-  ftrace -u 'go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire(pfx=+0(+8(%ax)):c512, n_pfx=+16(%ax):u64, m.s.id=16(0(%ax)):u64 )' ./a.out
+  example: trace a specific function and include runtime.chan* builtins:
+    ftrace -u 'main.add' -u 'runtime.chan*' ./main
+
+  example: trace a specific method of specific type:
+    ftrace -u 'main.(*Student).String ./main    
+
+  example: trace a specific method of specific type, and fetch its arguemnts:
+    ftrace -u 'main.(*Student).String' ./main \
+      'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
  `
 
 // rootCmd represents the base command when called without any subcommands
@@ -89,7 +96,7 @@ func init() {
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.
 
-	// rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.gofuncgraph.yaml)")
+	// rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.ftrace.yaml)")
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.

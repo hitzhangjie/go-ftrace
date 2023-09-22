@@ -2,6 +2,7 @@ package uprobe
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -23,20 +24,21 @@ const (
 )
 
 type ArgRule struct {
-	From     ArgLocation
-	Register string
-	Offset   int64
+	From        ArgLocation
+	Register    string
+	Offset      int64
+	Dereference bool
 }
 
 func parseFetchArgs(funcParams map[string]map[string]string) (fetchArgs map[string][]*FetchArg, err error) {
 	fetchArgs = map[string][]*FetchArg{}
-	for funcname, params := range funcParams {
-		for name, statement := range params {
-			fa, err := newFetchArg(name, statement)
+	for fname, params := range funcParams {
+		for name, expr := range params {
+			fa, err := newFetchArg(name, expr)
 			if err != nil {
 				return nil, err
 			}
-			fetchArgs[funcname] = append(fetchArgs[funcname], fa)
+			fetchArgs[fname] = append(fetchArgs[fname], fa)
 		}
 	}
 	return
@@ -48,45 +50,53 @@ func newFetchArg(varname, statement string) (_ *FetchArg, err error) {
 		err = fmt.Errorf("type not found: %s", statement)
 		return
 	}
-	switch parts[1][0] {
+
+	argAddr := parts[0]
+	argType := parts[1]
+
+	// check the datatype
+	switch argType[0] {
 	case 'u', 's':
-		switch parts[1][1:] {
+		switch argType[1:] {
 		case "8", "16", "32", "64":
 			break
 		default:
-			err = fmt.Errorf("only support 8/16/32/64 bits for u/s type: %s", parts[1])
+			err = fmt.Errorf("only support 8/16/32/64 bits for u/s type: %s", argType)
 			return
 		}
-
 	case 'c':
-		switch parts[1][1:] {
+		switch argType[1:] {
 		case "8", "16", "32", "64", "128", "256", "512":
 			break
 		default:
-			err = fmt.Errorf("only support 8/16/32/64/128/256/512 bits for c type: %s", parts[1])
+			err = fmt.Errorf("only support 8/16/32/64/128/256/512 bits for c type: %s", argType)
 			return
 		}
-
 	default:
-		err = fmt.Errorf("only support u/s/c type: %s", parts[1])
+		err = fmt.Errorf("only support u/s/c type: %s", argType)
 		return
 	}
 
-	targetSize, err := strconv.Atoi(parts[1][1:])
+	targetSize, err := strconv.Atoi(argType[1:])
 	if err != nil {
 		return
 	}
 	targetSize /= 8
 
+	// check the data address
+
 	// like pfx=+0(+8(%ax)):u64, let's parse the rules for +0(+8(%ax))
-	// then we'll get 3 rules:
-	// 	```[stackRule +0, stackRule +8, registerRule %ax]```,
-	// and we should reverse the rules, so the final rules will be
-	// ```[registerRule %ax, stackRule +8, stackRule +0]```.
+	// then we'll get 3 rules: [stackRule +0, stackRule +8, registerRule %ax],
+	// and reverse the rules,
+	// so final rules will be: registerRule %ax, stackRule +8, stackRule +0].
 	rules := []*ArgRule{}
 	buf := []byte{}
-	for i := 0; i < len(parts[0]); i++ {
-		if parts[0][i] == '(' || parts[0][i] == ')' && len(buf) > 0 {
+	for i := 0; i < len(argAddr); i++ {
+		if argAddr[i] != '(' && parts[0][i] != ')' {
+			buf = append(buf, argAddr[i])
+			continue
+		}
+		if len(buf) > 0 {
 			op, err := newFilterOp(string(buf))
 			if err != nil {
 				return nil, err
@@ -94,9 +104,6 @@ func newFetchArg(varname, statement string) (_ *FetchArg, err error) {
 			rules = append(rules, op)
 			buf = []byte{}
 			continue
-		}
-		if parts[0][i] != '(' && parts[0][i] != ')' {
-			buf = append(buf, parts[0][i])
 		}
 	}
 	if len(buf) > 0 {
@@ -116,13 +123,16 @@ func newFetchArg(varname, statement string) (_ *FetchArg, err error) {
 		Varname:   varname,
 		Statement: statement,
 		Size:      targetSize,
-		Type:      parts[1],
+		Type:      argType,
 		Rules:     rules,
 	}, nil
 }
 
 func newFilterOp(op string) (_ *ArgRule, err error) {
-	if len(op) != 0 && op[0] == '%' {
+	if len(op) == 0 {
+		return nil, errors.New("invalid op: empty")
+	}
+	if op[0] == '%' {
 		switch op[1:] {
 		case "ax", "bx", "cx", "dx", "si", "di", "bp", "sp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15":
 			break
@@ -130,17 +140,26 @@ func newFilterOp(op string) (_ *ArgRule, err error) {
 			return nil, fmt.Errorf("unknown register: %s", op[1:])
 		}
 		return &ArgRule{
-			From:     Register,
-			Register: op[1:],
+			From:        Register,
+			Register:    op[1:],
+			Dereference: true,
 		}, nil
 	}
+
+	var dereference bool
+	if op[0] == '*' {
+		dereference = true
+		op = op[1:]
+	}
+
 	offset, err := strconv.ParseInt(op, 10, 64)
 	if err != nil {
 		return
 	}
 	return &ArgRule{
-		From:   Stack,
-		Offset: offset,
+		From:        Stack,
+		Offset:      offset,
+		Dereference: dereference,
 	}, nil
 }
 

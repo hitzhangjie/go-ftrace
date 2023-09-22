@@ -22,7 +22,7 @@ type ParseOptions struct {
 // to determine the addresses of all wanted functions' entry and (multiple) return instruction,
 // then build the uprobes that will be attached.
 func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
-	filterArgs, err := parseFetchArgs(opts.FetchFuncArgs)
+	fetchArgs, err := parseFetchArgs(opts.FetchFuncArgs)
 	if err != nil {
 		return
 	}
@@ -96,8 +96,7 @@ func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
 			Address:   sym.Value,
 			AbsOffset: entOffset,
 			RelOffset: 0,
-			// TODO FetchArgs, 命名为Fetch有什么特殊含义吗？
-			FetchArgs: filterArgs[funcname],
+			FetchArgs: fetchArgs[funcname],
 			Wanted:    wanted,
 		})
 

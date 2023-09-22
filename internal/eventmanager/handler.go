@@ -8,7 +8,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (m *EventManager) Handle(event bpf.GofuncgraphEvent) (err error) {
+func (m *EventManager) Handle(event bpf.GoftraceEvent) (err error) {
 	m.Add(event)
 	log.Debugf("added event: %+v", event)
 	if m.CloseStack(event) {
@@ -20,7 +20,7 @@ func (m *EventManager) Handle(event bpf.GofuncgraphEvent) (err error) {
 	return
 }
 
-func (m *EventManager) Add(event bpf.GofuncgraphEvent) {
+func (m *EventManager) Add(event bpf.GoftraceEvent) {
 	length := len(m.goEvents[event.Goid])
 	if length == 0 && event.Location != 0 {
 		return
@@ -35,7 +35,7 @@ func (m *EventManager) Add(event bpf.GofuncgraphEvent) {
 		if lastEvent.Location == event.Location && lastEvent.Ip == event.Ip && lastEvent.Bp != event.CallerBp {
 			// duplicated entry event due to stack expansion/shrinkage
 			log.Debugf("duplicated entry event: %+v", event)
-			m.goEvents[event.Goid][length-1].GofuncgraphEvent = event
+			m.goEvents[event.Goid][length-1].GoftraceEvent = event
 			for range uprobe.FetchArgs {
 				for m.goArgs[event.Goid] == nil {
 					time.Sleep(time.Millisecond)
@@ -58,9 +58,9 @@ func (m *EventManager) Add(event bpf.GofuncgraphEvent) {
 		args = append(args, fetchArg.Varname, "=", fetchArg.SprintValue(arg.Data[:]))
 	}
 	m.goEvents[event.Goid] = append(m.goEvents[event.Goid], Event{
-		GofuncgraphEvent: event,
-		uprobe:           &uprobe,
-		argString:        strings.Join(args, ""),
+		GoftraceEvent: event,
+		uprobe:        &uprobe,
+		argString:     strings.Join(args, ""),
 	})
 	switch event.Location {
 	case 0:
@@ -70,11 +70,11 @@ func (m *EventManager) Add(event bpf.GofuncgraphEvent) {
 	}
 }
 
-func (m *EventManager) CloseStack(event bpf.GofuncgraphEvent) bool {
+func (m *EventManager) CloseStack(event bpf.GoftraceEvent) bool {
 	return m.goEventStack[event.Goid] == 0 && len(m.goEvents[event.Goid]) > 0
 }
 
-func (m *EventManager) ClearStack(event bpf.GofuncgraphEvent) {
+func (m *EventManager) ClearStack(event bpf.GoftraceEvent) {
 	delete(m.goEvents, event.Goid)
 	delete(m.goEventStack, event.Goid)
 }

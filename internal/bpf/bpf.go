@@ -13,8 +13,6 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -no-strip -target native -type event -type arg_rules -type arg_rule -type arg_data Gofuncgraph ./gofuncgraph.c -- -I./headers
-
 const (
 	EventDataOffset int64 = 436
 	VacantR10Offset       = -96
@@ -45,7 +43,7 @@ type LoadOptions struct {
 }
 
 type BPF struct {
-	objs    *GofuncgraphObjects
+	objs    *GoftraceObjects
 	closers []io.Closer
 }
 
@@ -66,12 +64,12 @@ func (b *BPF) BpfConfig(fetchArgs bool, goidOffset, gOffset int64) interface{} {
 }
 
 func (b *BPF) Load(uprobes []uprobe.Uprobe, opts LoadOptions) (err error) {
-	spec, err := LoadGofuncgraph()
+	spec, err := LoadGoftrace()
 	if err != nil {
 		return err
 	}
 
-	b.objs = &GofuncgraphObjects{}
+	b.objs = &GoftraceObjects{}
 	defer func() {
 		if err != nil {
 			return
@@ -116,12 +114,12 @@ func (b *BPF) setArgRules(pc uint64, fetchArgs []*uprobe.FetchArg) (err error) {
 	if len(fetchArgs) > 8 {
 		return fmt.Errorf("too many fetch args: %d > 8", len(fetchArgs))
 	}
-	argRules := GofuncgraphArgRules{Length: uint8(len(fetchArgs))}
+	argRules := GoftraceArgRules{Length: uint8(len(fetchArgs))}
 	for idx, fetchArg := range fetchArgs {
 		if len(fetchArg.Rules) > 8 {
 			return fmt.Errorf("too many rules: %d > 8", len(fetchArg.Rules))
 		}
-		rule := GofuncgraphArgRule{
+		rule := GoftraceArgRule{
 			Type:   uint8(fetchArg.Rules[len(fetchArg.Rules)-1].From),
 			Reg:    RegisterConstants[fetchArg.Rules[0].Register],
 			Size:   uint8(fetchArg.Size),
@@ -132,6 +130,9 @@ func (b *BPF) setArgRules(pc uint64, fetchArgs []*uprobe.FetchArg) (err error) {
 		for _, r := range fetchArg.Rules {
 			if r.From == uprobe.Stack {
 				rule.Offsets[j] = int16(r.Offset)
+				if r.Dereference {
+					rule.Deference[j] = 1
+				}
 				j++
 			}
 		}
@@ -185,13 +186,13 @@ func (b *BPF) Detach() {
 	fmt.Println()
 }
 
-func (b *BPF) PollEvents(ctx context.Context) chan GofuncgraphEvent {
-	ch := make(chan GofuncgraphEvent)
+func (b *BPF) PollEvents(ctx context.Context) chan GoftraceEvent {
+	ch := make(chan GoftraceEvent)
 
 	go func() {
 		defer close(ch)
 		for {
-			event := GofuncgraphEvent{}
+			event := GoftraceEvent{}
 			select {
 			case <-ctx.Done():
 				return
@@ -207,12 +208,12 @@ func (b *BPF) PollEvents(ctx context.Context) chan GofuncgraphEvent {
 	return ch
 }
 
-func (b *BPF) PollArg(ctx context.Context) <-chan GofuncgraphArgData {
-	ch := make(chan GofuncgraphArgData)
+func (b *BPF) PollArg(ctx context.Context) <-chan GoftraceArgData {
+	ch := make(chan GoftraceArgData)
 	go func() {
 		defer close(ch)
 		for {
-			data := GofuncgraphArgData{}
+			data := GoftraceArgData{}
 			select {
 			case <-ctx.Done():
 				return

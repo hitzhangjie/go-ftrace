@@ -13,26 +13,27 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type GofuncgraphArgData struct {
+type GoftraceArgData struct {
 	Goid uint64
 	Data [64]uint8
 }
 
-type GofuncgraphArgRule struct {
-	Type    uint8
-	Reg     uint8
-	Size    uint8
-	Length  uint8
-	Offsets [8]int16
+type GoftraceArgRule struct {
+	Type      uint8
+	Reg       uint8
+	Size      uint8
+	Length    uint8
+	Offsets   [8]int16
+	Deference [8]uint8
 }
 
-type GofuncgraphArgRules struct {
+type GoftraceArgRules struct {
 	Length uint8
 	_      [1]byte
-	Rules  [8]GofuncgraphArgRule
+	Rules  [8]GoftraceArgRule
 }
 
-type GofuncgraphEvent struct {
+type GoftraceEvent struct {
 	Goid     uint64
 	Ip       uint64
 	Bp       uint64
@@ -43,28 +44,28 @@ type GofuncgraphEvent struct {
 	_        [7]byte
 }
 
-// LoadGofuncgraph returns the embedded CollectionSpec for Gofuncgraph.
-func LoadGofuncgraph() (*ebpf.CollectionSpec, error) {
-	reader := bytes.NewReader(_GofuncgraphBytes)
+// LoadGoftrace returns the embedded CollectionSpec for Goftrace.
+func LoadGoftrace() (*ebpf.CollectionSpec, error) {
+	reader := bytes.NewReader(_GoftraceBytes)
 	spec, err := ebpf.LoadCollectionSpecFromReader(reader)
 	if err != nil {
-		return nil, fmt.Errorf("can't load Gofuncgraph: %w", err)
+		return nil, fmt.Errorf("can't load Goftrace: %w", err)
 	}
 
 	return spec, err
 }
 
-// LoadGofuncgraphObjects loads Gofuncgraph and converts it into a struct.
+// LoadGoftraceObjects loads Goftrace and converts it into a struct.
 //
 // The following types are suitable as obj argument:
 //
-//	*GofuncgraphObjects
-//	*GofuncgraphPrograms
-//	*GofuncgraphMaps
+//	*GoftraceObjects
+//	*GoftracePrograms
+//	*GoftraceMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func LoadGofuncgraphObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
-	spec, err := LoadGofuncgraph()
+func LoadGoftraceObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+	spec, err := LoadGoftrace()
 	if err != nil {
 		return err
 	}
@@ -72,27 +73,27 @@ func LoadGofuncgraphObjects(obj interface{}, opts *ebpf.CollectionOptions) error
 	return spec.LoadAndAssign(obj, opts)
 }
 
-// GofuncgraphSpecs contains maps and programs before they are loaded into the kernel.
+// GoftraceSpecs contains maps and programs before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type GofuncgraphSpecs struct {
-	GofuncgraphProgramSpecs
-	GofuncgraphMapSpecs
+type GoftraceSpecs struct {
+	GoftraceProgramSpecs
+	GoftraceMapSpecs
 }
 
-// GofuncgraphSpecs contains programs before they are loaded into the kernel.
+// GoftraceSpecs contains programs before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type GofuncgraphProgramSpecs struct {
+type GoftraceProgramSpecs struct {
 	Ent           *ebpf.ProgramSpec `ebpf:"ent"`
 	GoroutineExit *ebpf.ProgramSpec `ebpf:"goroutine_exit"`
 	Ret           *ebpf.ProgramSpec `ebpf:"ret"`
 }
 
-// GofuncgraphMapSpecs contains maps before they are loaded into the kernel.
+// GoftraceMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
-type GofuncgraphMapSpecs struct {
+type GoftraceMapSpecs struct {
 	ArgQueue        *ebpf.MapSpec `ebpf:"arg_queue"`
 	ArgRulesMap     *ebpf.MapSpec `ebpf:"arg_rules_map"`
 	ArgStack        *ebpf.MapSpec `ebpf:"arg_stack"`
@@ -102,25 +103,25 @@ type GofuncgraphMapSpecs struct {
 	ShouldTraceRip  *ebpf.MapSpec `ebpf:"should_trace_rip"`
 }
 
-// GofuncgraphObjects contains all objects after they have been loaded into the kernel.
+// GoftraceObjects contains all objects after they have been loaded into the kernel.
 //
-// It can be passed to LoadGofuncgraphObjects or ebpf.CollectionSpec.LoadAndAssign.
-type GofuncgraphObjects struct {
-	GofuncgraphPrograms
-	GofuncgraphMaps
+// It can be passed to LoadGoftraceObjects or ebpf.CollectionSpec.LoadAndAssign.
+type GoftraceObjects struct {
+	GoftracePrograms
+	GoftraceMaps
 }
 
-func (o *GofuncgraphObjects) Close() error {
-	return _GofuncgraphClose(
-		&o.GofuncgraphPrograms,
-		&o.GofuncgraphMaps,
+func (o *GoftraceObjects) Close() error {
+	return _GoftraceClose(
+		&o.GoftracePrograms,
+		&o.GoftraceMaps,
 	)
 }
 
-// GofuncgraphMaps contains all maps after they have been loaded into the kernel.
+// GoftraceMaps contains all maps after they have been loaded into the kernel.
 //
-// It can be passed to LoadGofuncgraphObjects or ebpf.CollectionSpec.LoadAndAssign.
-type GofuncgraphMaps struct {
+// It can be passed to LoadGoftraceObjects or ebpf.CollectionSpec.LoadAndAssign.
+type GoftraceMaps struct {
 	ArgQueue        *ebpf.Map `ebpf:"arg_queue"`
 	ArgRulesMap     *ebpf.Map `ebpf:"arg_rules_map"`
 	ArgStack        *ebpf.Map `ebpf:"arg_stack"`
@@ -130,8 +131,8 @@ type GofuncgraphMaps struct {
 	ShouldTraceRip  *ebpf.Map `ebpf:"should_trace_rip"`
 }
 
-func (m *GofuncgraphMaps) Close() error {
-	return _GofuncgraphClose(
+func (m *GoftraceMaps) Close() error {
+	return _GoftraceClose(
 		m.ArgQueue,
 		m.ArgRulesMap,
 		m.ArgStack,
@@ -142,24 +143,24 @@ func (m *GofuncgraphMaps) Close() error {
 	)
 }
 
-// GofuncgraphPrograms contains all programs after they have been loaded into the kernel.
+// GoftracePrograms contains all programs after they have been loaded into the kernel.
 //
-// It can be passed to LoadGofuncgraphObjects or ebpf.CollectionSpec.LoadAndAssign.
-type GofuncgraphPrograms struct {
+// It can be passed to LoadGoftraceObjects or ebpf.CollectionSpec.LoadAndAssign.
+type GoftracePrograms struct {
 	Ent           *ebpf.Program `ebpf:"ent"`
 	GoroutineExit *ebpf.Program `ebpf:"goroutine_exit"`
 	Ret           *ebpf.Program `ebpf:"ret"`
 }
 
-func (p *GofuncgraphPrograms) Close() error {
-	return _GofuncgraphClose(
+func (p *GoftracePrograms) Close() error {
+	return _GoftraceClose(
 		p.Ent,
 		p.GoroutineExit,
 		p.Ret,
 	)
 }
 
-func _GofuncgraphClose(closers ...io.Closer) error {
+func _GoftraceClose(closers ...io.Closer) error {
 	for _, closer := range closers {
 		if err := closer.Close(); err != nil {
 			return err
@@ -170,5 +171,5 @@ func _GofuncgraphClose(closers ...io.Closer) error {
 
 // Do not access this directly.
 //
-//go:embed gofuncgraph_bpfel_x86.o
-var _GofuncgraphBytes []byte
+//go:embed goftrace_bpfel_x86.o
+var _GoftraceBytes []byte
