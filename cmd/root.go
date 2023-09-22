@@ -14,7 +14,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var usage = `go-ftrace is an eBPF(2)-based ftrace(1)-like function graph tracer for Go! 
+var usage = `go-ftrace is bpf(2)-based ftrace(1)-like function graph tracer for Go! 
 
 for now, only support following cases:
 - OS: Linux, with support for bpf(2) and uprobe
