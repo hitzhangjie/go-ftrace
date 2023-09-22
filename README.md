@@ -1,6 +1,6 @@
 # go-ftrace
 
-go-ftrace is an eBPF(2)-based ftrace(1)-like function graph tracer for Golang processes.
+go-ftrace is an bpf(2)-based ftrace(1)-like function graph tracer for Golang processes.
 
 **Limits: for now, only support following cases**
 - OS: Linux, with support for bpf(2) and uprobe
