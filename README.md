@@ -69,6 +69,85 @@ Also, `Makefile` is provided, run `make && make install` is enough.
 - Wall time profiling;
 - Execution flow observing;
 
+Here's an example when tracing `examples/main.go`, here's the code snippet:
+```go
+func main() {
+	for {
+		doSomething()
+	}
+}
+
+...
+
+func doSomething() {
+	add(1, 2)
+	minus(1, 2)
+
+	s := &Student{"zhang", 100}
+	fmt.Printf("student: %s\n", s)
+
+	time.Sleep(time.Second)
+}
+```
+
+if we want to observing the details of `doSomething`, we can trace like ths:
+
+```bash
+sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main \
+  'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+```
+
+ftrace will output the details:
+
+```bash
+$ sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+WARN[0000] skip main.main, failed to get ret offsets: no ret offsets 
+found 14 uprobes, large number of uprobes (>1000) need long time for attaching and detaching, continue? [Y/n]
+
+>>> press `y` to continue
+y
+add arg rule at 47cc40: {Type:1 Reg:0 Size:8 Length:1 Offsets:[0 0 0 0 0 0 0 0] Deference:[1 0 0 0 0 0 0 0]}
+add arg rule at 47cc40: {Type:1 Reg:0 Size:8 Length:1 Offsets:[8 0 0 0 0 0 0 0] Deference:[0 0 0 0 0 0 0 0]}
+add arg rule at 47cc40: {Type:1 Reg:0 Size:8 Length:1 Offsets:[16 0 0 0 0 0 0 0] Deference:[0 0 0 0 0 0 0 0]}
+INFO[0002] start tracing                                
+
+...
+
+23 17:10:59.0888           main.doSomething() { main.main+15 /home/zhangjie/github/go-ftrace/examples/main.go:10
+23 17:10:59.0888             main.add() { main.doSomething+37 /home/zhangjie/github/go-ftrace/examples/main.go:15
+23 17:10:59.0888               main.add1() { main.add+149 /home/zhangjie/github/go-ftrace/examples/main.go:27
+23 17:10:59.0888                 main.add3() { main.add1+149 /home/zhangjie/github/go-ftrace/examples/main.go:40
+23 17:10:59.0888 000.0000        } main.add3+148 /home/zhangjie/github/go-ftrace/examples/main.go:46
+23 17:10:59.0888 000.0000      } main.add1+154 /home/zhangjie/github/go-ftrace/examples/main.go:33
+23 17:10:59.0888 000.0000    } main.add+154 /home/zhangjie/github/go-ftrace/examples/main.go:27
+23 17:10:59.0888             main.minus() { main.doSomething+52 /home/zhangjie/github/go-ftrace/examples/main.go:16
+23 17:10:59.0888 000.0000    } main.minus+3 /home/zhangjie/github/go-ftrace/examples/main.go:51
+23 17:10:59.0888             main.(*Student).String(s.name=zhang<ni, s.name.len=5, s.age=100) { fmt.(*pp).handleMethods+690 /opt/go/src/fmt/print.go:673
+23 17:10:59.0888 000.0000    } main.(*Student).String+138 /home/zhangjie/github/go-ftrace/examples/main.go:64
+23 17:11:00.0889 001.0002  } main.doSomething+180 /home/zhangjie/github/go-ftrace/examples/main.go:22
+
+23 17:11:00.0890           main.doSomething() { main.main+15 /home/zhangjie/github/go-ftrace/examples/main.go:10
+23 17:11:00.0890             main.add() { main.doSomething+37 /home/zhangjie/github/go-ftrace/examples/main.go:15
+23 17:11:00.0890               main.add1() { main.add+149 /home/zhangjie/github/go-ftrace/examples/main.go:27
+23 17:11:00.0890                 main.add3() { main.add1+149 /home/zhangjie/github/go-ftrace/examples/main.go:40
+23 17:11:00.0890 000.0000        } main.add3+148 /home/zhangjie/github/go-ftrace/examples/main.go:46
+23 17:11:00.0890 000.0000      } main.add1+154 /home/zhangjie/github/go-ftrace/examples/main.go:33
+23 17:11:00.0890 000.0001    } main.add+154 /home/zhangjie/github/go-ftrace/examples/main.go:27
+23 17:11:00.0890             main.minus() { main.doSomething+52 /home/zhangjie/github/go-ftrace/examples/main.go:16
+23 17:11:00.0890 000.0000    } main.minus+3 /home/zhangjie/github/go-ftrace/examples/main.go:51
+23 17:11:00.0891             main.(*Student).String(s.name=zhang<ni, s.name.len=5, s.age=100) { fmt.(*pp).handleMethods+690 /opt/go/src/fmt/print.go:673
+23 17:11:00.0891 000.0000    } main.(*Student).String+138 /home/zhangjie/github/go-ftrace/examples/main.go:64
+23 17:11:01.0895 001.0005  } main.doSomething+180 /home/zhangjie/github/go-ftrace/examples/main.go:22
+
+...
+
+>>> press `Ctrl+C` to quit.
+
+INFO[0007] start detaching                              
+detaching 16/16
+```
+
+
 # Acknowledgments
 
 This repo is forked from [jschwinger233/gofuncgraph](https://github.com/jschwinger233/gofuncgraph), with some modifications to improve usability and fix the bugs of fetching arguments. 

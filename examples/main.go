@@ -1,18 +1,24 @@
 package main
 
-import "time"
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 func main() {
 	for {
-		add(1, 2)
-		minus(1, 2)
-
-		s := &Student{"zhang", 100}
-		fmt.Printf("student: %s\n", s)
-
-		time.Sleep(time.Second)
+		doSomething()
 	}
+}
+
+func doSomething() {
+	add(1, 2)
+	minus(1, 2)
+
+	s := &Student{"zhang", 100}
+	fmt.Printf("student: %s\n", s)
+
+	time.Sleep(time.Second)
 }
 
 //go:noinline
