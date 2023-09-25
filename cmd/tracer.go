@@ -62,12 +62,12 @@ func NewTracer(bin string, excludeVendor bool, uprobeWildcards, fetch []string) 
 func (t *Tracer) Parse() (funcs []string, fetchArgs map[string]map[string]string, err error) {
 	fetchArgs = map[string]map[string]string{}
 	for _, s := range t.fetch {
-
-		// see: go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire(pfx=+0(+8(%ax)):c512, n_pfx=+16(%ax):u64, m.s.id=16(0(%ax)):u64 )
+		// see: main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)
 		if s[len(s)-1] == ')' {
 			stack := []byte{')'}
 			for i := len(s) - 2; i >= 0; i-- {
-				// verifying the balance parenthese of expression ...tryAcquire.(pfx=, n_pfx=, ...)
+				// verifying the balance parenthese of expression:
+				// .String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)
 				if s[i] == ')' {
 					stack = append(stack, ')')
 				} else if s[i] == '(' {
@@ -83,7 +83,7 @@ func (t *Tracer) Parse() (funcs []string, fetchArgs map[string]map[string]string
 				if len(stack) == 0 {
 					funcname := s[:i]
 					fetchArgs[funcname] = map[string]string{}
-					// keep parsing the (pfx= , n_pfx= , ...)
+					// keep parsing the (s.name= , s.name.len= , s.age=...)
 					for _, part := range strings.Split(s[i+1:len(s)-1], ",") {
 						varState := strings.Split(part, "=")
 						if len(varState) != 2 {
@@ -102,7 +102,7 @@ func (t *Tracer) Parse() (funcs []string, fetchArgs map[string]map[string]string
 				return
 			}
 		}
-		// see: go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire
+		// see: main.(*Student).String
 		funcs = append(funcs, s)
 	}
 	return
