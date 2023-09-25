@@ -85,10 +85,13 @@ func newFetchArg(varname, statement string) (_ *FetchArg, err error) {
 
 	// check the data address
 
-	// like pfx=+0(+8(%ax)):u64, let's parse the rules for +0(+8(%ax))
-	// then we'll get 3 rules: [stackRule +0, stackRule +8, registerRule %ax],
-	// and reverse the rules,
-	// so final rules will be: registerRule %ax, stackRule +8, stackRule +0].
+	// like: s.name=(*+0(%ax)):c64, let's parse the rules for (*+0(%ax)),
+	// then we'll get 2 rules: [stackRule *+0, registerRule %ax],
+	// and reverse the rules, so final rules is: registerRule %ax, stackRule *+0].
+	//
+	// *+0, means the effective address is EA=*(%ax+0), so why not *(%ax)?
+	// yeah, *(%eax) or ((%eax)) is much clearer, here we just want to simplify
+	// the parsing logic in `newFilterOp(...)`
 	rules := []*ArgRule{}
 	buf := []byte{}
 	for i := 0; i < len(argAddr); i++ {

@@ -56,51 +56,60 @@ func NewTracer(bin string, excludeVendor bool, uprobeWildcards, fetch []string) 
 
 // Parse parse the args `ftrace [flags] binary <args>`
 //
-// @return out: the function names to output
-// @return fetch: the function name => parameters (parameter name => parameter value)
-// @return err: return err if <args> is invalid
+// @return funcs    : the function names to trace
+// @return fetchArgs: the function name => parameters (parameter name => parameter value)
+// @return err      : return err if <args> is invalid
 func (t *Tracer) Parse() (funcs []string, fetchArgs map[string]map[string]string, err error) {
 	fetchArgs = map[string]map[string]string{}
 	for _, s := range t.fetch {
-		// see: main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)
-		if s[len(s)-1] == ')' {
-			stack := []byte{')'}
-			for i := len(s) - 2; i >= 0; i-- {
-				// verifying the balance parenthese of expression:
-				// .String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)
-				if s[i] == ')' {
-					stack = append(stack, ')')
-				} else if s[i] == '(' {
-					if len(stack) > 0 && stack[len(stack)-1] == ')' {
-						stack = stack[:len(stack)-1]
-					} else {
-						err = fmt.Errorf("imbalanced parenthese: %s", s)
-						return
-					}
-				}
+		// see: main.(*Student).String
+		if s[len(s)-1] != ')' {
+			funcs = append(funcs, s)
+			continue
+		}
 
-				// when stack becomes empty again, then we find the funcname s[:i]
-				if len(stack) == 0 {
-					funcname := s[:i]
-					fetchArgs[funcname] = map[string]string{}
-					// keep parsing the (s.name= , s.name.len= , s.age=...)
-					for _, part := range strings.Split(s[i+1:len(s)-1], ",") {
-						varState := strings.Split(part, "=")
-						if len(varState) != 2 {
-							err = fmt.Errorf("invalid variable statement: %s", varState)
-							return
-						}
-						fetchArgs[funcname][strings.TrimSpace(varState[0])] = strings.TrimSpace(varState[1])
-					}
-					// now shrink s to function name
-					s = s[:i]
-					break
+		// see: main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)
+		stack := []byte{')'}
+		for i := len(s) - 2; i >= 0; i-- {
+			// verifying the balance parenthese of expression:
+			// .String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)
+			if s[i] == ')' {
+				stack = append(stack, ')')
+			} else if s[i] == '(' {
+				if len(stack) > 0 && stack[len(stack)-1] == ')' {
+					stack = stack[:len(stack)-1]
+				} else {
+					err = fmt.Errorf("imbalanced parenthese: %s", s)
+					return
 				}
 			}
-			if len(stack) > 0 {
-				err = fmt.Errorf("imbalanced parenthese: %s", s)
-				return
+
+			// when stack becomes empty again, then we find the funcname s[:i]
+			if len(stack) != 0 {
+				continue
 			}
+
+			funcname := s[:i]
+			fetchArgs[funcname] = map[string]string{}
+
+			// keep parsing the (s.name= , s.name.len= , s.age=...)
+			for _, part := range strings.Split(s[i+1:len(s)-1], ",") {
+				varState := strings.Split(part, "=")
+				if len(varState) != 2 {
+					err = fmt.Errorf("invalid variable statement: %s", varState)
+					return
+				}
+				argName := strings.TrimSpace(varState[0])
+				argExpr := strings.TrimSpace(varState[1])
+				fetchArgs[funcname][argName] = argExpr
+			}
+			// now shrink s to function name
+			s = s[:i]
+			break
+		}
+		if len(stack) > 0 {
+			err = fmt.Errorf("imbalanced parenthese: %s", s)
+			return
 		}
 		// see: main.(*Student).String
 		funcs = append(funcs, s)
@@ -147,6 +156,8 @@ requireConfirm:
 		return
 	}
 	log.Debugf("offset of goid from g is %d, offset of g from fs is -0x%x\n", goidOffset, -gOffset)
+
+	// load bpf programme and attach uprobes
 	if err = t.bpf.Load(uprobes, bpf.LoadOptions{
 		GoidOffset: goidOffset,
 		GOffset:    gOffset,
@@ -163,6 +174,7 @@ requireConfirm:
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// poll result and print
 	eventManager, err := eventmanager.New(uprobes, t.elf, t.bpf.PollArg(ctx))
 	if err != nil {
 		return

@@ -34,6 +34,7 @@ func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
 
 	wantedFuncs := map[string]interface{}{}
 	attachFuncs := []string{}
+
 	for _, symbol := range symbols {
 		if debugelf.ST_TYPE(symbol.Info) != debugelf.STT_FUNC {
 			continue
