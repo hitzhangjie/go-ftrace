@@ -120,22 +120,8 @@ add arg rule at 47cc40: {Type:1 Reg:0 Size:8 Length:1 Offsets:[0 0 0 0 0 0 0 0] 
 add arg rule at 47cc40: {Type:1 Reg:0 Size:8 Length:1 Offsets:[8 0 0 0 0 0 0 0] Deference:[0 0 0 0 0 0 0 0]}
 add arg rule at 47cc40: {Type:1 Reg:0 Size:8 Length:1 Offsets:[16 0 0 0 0 0 0 0] Deference:[0 0 0 0 0 0 0 0]}
 INFO[0002] start tracing                                
-
 ...
-
-23 17:10:59.0888           main.doSomething() { main.main+15 /home/zhangjie/github/go-ftrace/examples/main.go:10
-23 17:10:59.0888             main.add() { main.doSomething+37 /home/zhangjie/github/go-ftrace/examples/main.go:15
-23 17:10:59.0888               main.add1() { main.add+149 /home/zhangjie/github/go-ftrace/examples/main.go:27
-23 17:10:59.0888                 main.add3() { main.add1+149 /home/zhangjie/github/go-ftrace/examples/main.go:40
-23 17:10:59.0888 000.0000        } main.add3+148 /home/zhangjie/github/go-ftrace/examples/main.go:46
-23 17:10:59.0888 000.0000      } main.add1+154 /home/zhangjie/github/go-ftrace/examples/main.go:33
-23 17:10:59.0888 000.0000    } main.add+154 /home/zhangjie/github/go-ftrace/examples/main.go:27
-23 17:10:59.0888             main.minus() { main.doSomething+52 /home/zhangjie/github/go-ftrace/examples/main.go:16
-23 17:10:59.0888 000.0000    } main.minus+3 /home/zhangjie/github/go-ftrace/examples/main.go:51
-23 17:10:59.0888             main.(*Student).String(s.name=zhang<ni, s.name.len=5, s.age=100) { fmt.(*pp).handleMethods+690 /opt/go/src/fmt/print.go:673
-23 17:10:59.0888 000.0000    } main.(*Student).String+138 /home/zhangjie/github/go-ftrace/examples/main.go:64
-23 17:11:00.0889 001.0002  } main.doSomething+180 /home/zhangjie/github/go-ftrace/examples/main.go:22
-
+                           🔬 You can inspect all nested function calls, when and where started or finished
 23 17:11:00.0890           main.doSomething() { main.main+15 /home/zhangjie/github/go-ftrace/examples/main.go:10
 23 17:11:00.0890             main.add() { main.doSomething+37 /home/zhangjie/github/go-ftrace/examples/main.go:15
 23 17:11:00.0890               main.add1() { main.add+149 /home/zhangjie/github/go-ftrace/examples/main.go:27
@@ -145,10 +131,12 @@ INFO[0002] start tracing
 23 17:11:00.0890 000.0001    } main.add+154 /home/zhangjie/github/go-ftrace/examples/main.go:27
 23 17:11:00.0890             main.minus() { main.doSomething+52 /home/zhangjie/github/go-ftrace/examples/main.go:16
 23 17:11:00.0890 000.0000    } main.minus+3 /home/zhangjie/github/go-ftrace/examples/main.go:51
+
+                            🔍 Here, member fields of function receiver extracted, receiver is the 1st argument actually.
 23 17:11:00.0891             main.(*Student).String(s.name=zhang<ni, s.name.len=5, s.age=100) { fmt.(*pp).handleMethods+690 /opt/go/src/fmt/print.go:673
 23 17:11:00.0891 000.0000    } main.(*Student).String+138 /home/zhangjie/github/go-ftrace/examples/main.go:64
 23 17:11:01.0895 001.0005  } main.doSomething+180 /home/zhangjie/github/go-ftrace/examples/main.go:22
-
+                 ⏱️ Here, timecost is displayed at the end of the function call
 ...
 
 >>> press `Ctrl+C` to quit.
@@ -156,6 +144,8 @@ INFO[0002] start tracing
 INFO[0007] start detaching                              
 detaching 16/16
 ```
+
+
 
 # 致谢
 
