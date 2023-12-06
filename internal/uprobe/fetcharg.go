@@ -95,12 +95,13 @@ func newFetchArg(varname, statement string) (_ *FetchArg, err error) {
 	rules := []*ArgRule{}
 	buf := []byte{}
 	for i := 0; i < len(argAddr); i++ {
-		if argAddr[i] != '(' && parts[0][i] != ')' {
-			buf = append(buf, argAddr[i])
+		ch := argAddr[i]
+		if ch != '(' && ch != ')' {
+			buf = append(buf, ch)
 			continue
 		}
 		if len(buf) > 0 {
-			op, err := newFilterOp(string(buf))
+			op, err := newFetchOp(string(buf))
 			if err != nil {
 				return nil, err
 			}
@@ -110,7 +111,7 @@ func newFetchArg(varname, statement string) (_ *FetchArg, err error) {
 		}
 	}
 	if len(buf) > 0 {
-		op, err := newFilterOp(string(buf))
+		op, err := newFetchOp(string(buf))
 		if err != nil {
 			return nil, err
 		}
@@ -131,10 +132,12 @@ func newFetchArg(varname, statement string) (_ *FetchArg, err error) {
 	}, nil
 }
 
-func newFilterOp(op string) (_ *ArgRule, err error) {
+func newFetchOp(op string) (_ *ArgRule, err error) {
 	if len(op) == 0 {
 		return nil, errors.New("invalid op: empty")
 	}
+
+	// then it may be a register
 	if op[0] == '%' {
 		switch op[1:] {
 		case "ax", "bx", "cx", "dx", "si", "di", "bp", "sp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15":
@@ -143,9 +146,8 @@ func newFilterOp(op string) (_ *ArgRule, err error) {
 			return nil, fmt.Errorf("unknown register: %s", op[1:])
 		}
 		return &ArgRule{
-			From:        Register,
-			Register:    op[1:],
-			Dereference: true,
+			From:     Register,
+			Register: op[1:],
 		}, nil
 	}
 
@@ -155,6 +157,7 @@ func newFilterOp(op string) (_ *ArgRule, err error) {
 		op = op[1:]
 	}
 
+	// then it must be a stack offset
 	offset, err := strconv.ParseInt(op, 10, 64)
 	if err != nil {
 		return

@@ -57,7 +57,7 @@ func NewTracer(bin string, excludeVendor bool, uprobeWildcards, fetch []string) 
 // Parse parse the args `ftrace [flags] binary <args>`
 //
 // @return funcs    : the function names to trace
-// @return fetchArgs: the function name => parameters (parameter name => parameter value)
+// @return fetchArgs: the function name => parameters (parameter name => parameter <expr>:<type>)
 // @return err      : return err if <args> is invalid
 func (t *Tracer) Parse() (funcs []string, fetchArgs map[string]map[string]string, err error) {
 	fetchArgs = map[string]map[string]string{}
@@ -94,13 +94,13 @@ func (t *Tracer) Parse() (funcs []string, fetchArgs map[string]map[string]string
 
 			// keep parsing the (s.name= , s.name.len= , s.age=...)
 			for _, part := range strings.Split(s[i+1:len(s)-1], ",") {
-				varState := strings.Split(part, "=")
-				if len(varState) != 2 {
-					err = fmt.Errorf("invalid variable statement: %s", varState)
+				vals := strings.Split(part, "=")
+				if len(vals) != 2 {
+					err = fmt.Errorf("invalid variable statement: %s", vals)
 					return
 				}
-				argName := strings.TrimSpace(varState[0])
-				argExpr := strings.TrimSpace(varState[1])
+				argName := strings.TrimSpace(vals[0])
+				argExpr := strings.TrimSpace(vals[1])
 				fetchArgs[funcname][argName] = argExpr
 			}
 			// now shrink s to function name

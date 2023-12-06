@@ -19,12 +19,12 @@ type GoftraceArgData struct {
 }
 
 type GoftraceArgRule struct {
-	Type      uint8
-	Reg       uint8
-	Size      uint8
-	Length    uint8
-	Offsets   [8]int16
-	Deference [8]uint8
+	Type        uint8
+	Reg         uint8
+	Size        uint8
+	Length      uint8
+	Offsets     [8]int16
+	Dereference [8]uint8
 }
 
 type GoftraceArgRules struct {

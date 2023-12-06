@@ -36,8 +36,8 @@ The 'expr' part is the EA (effective address) where data stored, let's explain t
     $ ../scripts/offsets.py --bin ./main --expr 'main.Student'
 
     struct main.Student {
-        struct string              name;                 /*0    16 */
-        int                        age;                  /*    16     8*/
+        struct string              name;                 /* 0    16 */
+        int                        age;                  /* 16    8 */
 
         /* size: 24, cachelines: 1, members: 2 */
         /* last cacheline: 24 bytes */

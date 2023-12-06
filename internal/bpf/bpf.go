@@ -131,7 +131,7 @@ func (b *BPF) setArgRules(pc uint64, fetchArgs []*uprobe.FetchArg) (err error) {
 			if r.From == uprobe.Stack {
 				rule.Offsets[j] = int16(r.Offset)
 				if r.Dereference {
-					rule.Deference[j] = 1
+					rule.Dereference[j] = 1
 				}
 				j++
 			}

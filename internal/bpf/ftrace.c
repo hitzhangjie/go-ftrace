@@ -43,7 +43,7 @@ struct arg_rule
 	__u8 size;
 	__u8 length;
 	__s16 offsets[8];
-	__u8 deference[8];
+	__u8 dereference[8];
 };
 
 struct arg_rules
@@ -193,7 +193,7 @@ static __always_inline void fetch_args_from_memory(struct pt_regs *ctx, struct a
 
 	for (int i = 0; i < 8 && i < rule->length; i++)
 	{
-		if (rule->deference[i] == 1)
+		if (rule->dereference[i] == 1)
 		{
 			bpf_probe_read_user(&addr, sizeof(addr), (void *)addr + rule->offsets[i]);
 		}
