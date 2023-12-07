@@ -10,7 +10,11 @@ go-ftrace is an bpf(2)-based ftrace(1)-like function graph tracer for Golang pro
 
 # Usage
 
-`examples/main.go` is provided for testing, try following tracing tests:
+`examples` provide two examples to show how to use go-ftrace.
+
+## Trace functions
+
+Check `examples/trace_funcs`, try following tracing tests:
 
   ```
   example: trace a specific function: "main.add":
@@ -27,15 +31,25 @@ go-ftrace is an bpf(2)-based ftrace(1)-like function graph tracer for Golang pro
 
   example: trace a specific method of specific type:
     ftrace -u 'main.(*Student).String ./main    
-
-  example: trace a specific method of specific type, and fetch its arguemnts:
-    ftrace -u 'main.(*Student).String' ./main \
-      'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
   ```
 
-`examples/Makefile` is provided, you can run `make <target>` to quickly test it.
+## Trace functions and arguments
 
-ps: Tracing with ftrace can be done either before or after launching ./main, both approaches will work.
+Check `examples/trace_funcs_arguments`, try following tracing tests:
+
+  ```
+  example: trace a specific method of specific type, and fetch its receiver argument:
+    ftrace -u 'main.(*Student).String' ./main \
+      'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+  
+  example: trace a specific method of specific type, and fetch its arguments list:
+    ftrace -u 'main.(*Student).BuyBook' ./main \
+      'main.(*Student).BuyBook(s.book=(+0(%bx)):c128, s.book.len=(%cx):s64, s.num=(%di):s64)'
+  ```
+
+>ps: `Makefile` is provided, you can run `make <target>` to quickly test it.
+>
+> And tracing by ftrace can be done either before or after launching ./main, both approaches will work.
 
 # Installation
 

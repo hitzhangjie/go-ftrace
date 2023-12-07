@@ -4,10 +4,10 @@ all: main.go
 trace_add:
 	sudo ftrace -u main.add ./main
 
-trace_alladd:
+trace_addall:
 	sudo ftrace -u main.add* ./main
 
-trace_alladdminus:
+trace_addminus:
 	sudo ftrace -u main.add* -u main.minus* ./main
 
 trace_student:
@@ -16,4 +16,4 @@ trace_student:
 clean:
 	rm -f ./main
 
-.PHONY: clean trace_add trace_alladd trace_alladdminus trace_student
+.PHONY: clean trace_add trace_addall trace_addminus trace_student
