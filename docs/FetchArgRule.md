@@ -18,7 +18,7 @@ functionName(argument1=(expr1):type1, argument2=(expr2):type2, argument3=(expr3)
 ```
 
 - argument1~3: it's the identifier when displaying the value
-- expr1~3: it's the EA where data stored, dereference must be done before decoded
+- expr1~3: it's the EA where data stored, data must be read from EA before decoded
 - type1~3: it's the datatype, 's|u<bitwidth>' for integers, 'c<bitwidth>' for string
     - s64 for 64-bit signed integer 
     - u64 for 64-bit unsigned integer
@@ -90,6 +90,4 @@ The 'expr' part is the EA (effective address) where data stored, let's explain t
 
 ## Improvements
 
-- [ ] data in register %ax, %bx, ... aren't always pointers, may be `immediate operand`  
-    example: `func(context.Context, f1 string, f2 int)`, f2 will passed as an immediate operand in register (go1.17 uses register to pass arguments)
 - [ ] automatically generate the argument's fetching rule via scripts
