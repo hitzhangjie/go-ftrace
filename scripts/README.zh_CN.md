@@ -1,10 +1,10 @@
 # offsets.py
 
-## How to usage this script
+## 如何使用这个脚本
 
-this script uses Linux tool 'pahole' to inspect ELF binary with DWARF debugging info and extract offsets of specified objects.
+这个脚本使用Linux工具'pahole'来检查带有DWARF调试信息的ELF二进制文件，并提取指定对象的偏移量。
 
-for example, extract the offsets of `runtime.g->goid` and `runtime.g->stack->hi`:
+例如，提取`runtime.g->goid`和`runtime.g->stack->hi`的偏移量：
 
 ```bash
 $ ./offsets.py --bin ftrace --expr runtime.g->goid
@@ -24,11 +24,11 @@ $ ./offsets.py --bin ftrace --expr runtime.g->stack->hi
 +8(_)
 ```
 
-## How does this script work
+## 这个脚本是如何工作的
 
-first, this script will use 'pahole' to inspect the padding and holes of specified object in the ELF bniary with the help of DWARF.
+首先，这个脚本将使用'pahole'工具来检查带有DWARF调试信息的ELF二进制文件中指定对象的填充(paddings)和空洞(holes)。
 
-for example, when we run 'pahole -C runtime.g ftrace', it outputs:
+例如，当我们运行'pahole -C runtime.g ftrace'时，它的输出如下：
 
 ```bash
 $ pahole -C runtime.g ftrace
@@ -102,9 +102,9 @@ struct runtime.g {
 };
 ```
 
-then, this script will use RegExp to parse the output and extract the offsets of members of the specified object.
+然后，这个脚本将使用正则表达式来解析输出并提取指定对象的成员偏移量。
 
-for the runtime.g, it will extract all the member offsets, like:
+对于 runtime.g，它将提取所有成员的偏移量，例如：
 ```
 - type=runtime.stack, name=stack, offset=6
 - type=uintptr, name=stackguard0, offset=16
@@ -112,14 +112,14 @@ for the runtime.g, it will extract all the member offsets, like:
 - ...
 ```
 
-if we specify `./offsets.py --expr runtime.g->stack`, it will find the member 'stack' in runtime.g, and prints its members' offsets.
+如果我们指定 `./offsets.py --expr runtime.g->stack`，它将在 runtime.g 中找到成员 'stack'，并打印其成员的偏移量。
 
-if we specify `./offsets.py --expr runtime.g->stack->hi`, it will first find the member 'stack' in runtime.g, then find the member 'hi' in runtime.stack, and prints its offset.
+如果我们指定 `./offsets.py --expr runtime.g->stack->hi`，它将首先在 runtime.g 中找到成员 'stack'，然后在 runtime.stack 中找到成员 'hi'，并打印其偏移量。
 
-at a nutshell, it works like this with the help of DWARF, pahole and RegExp.
+简而言之，借助 DWARF、pahole 和 RegExp，offsets.py的工作原理大致就是这样的。
 
-## Why we need this script
+## 为什么我们需要这个脚本
 
-when we `go-ftrace` to trace the user-defined functions and runtime functions, we may want to get or set the members of arguments, then we need to know the offsets.
+当我们使用 `go-ftrace` 跟踪用户定义的函数和运行时函数时，我们可能想要获取或设置参数的成员，因此我们需要知道偏移量。
 
-This **offsets.py** will help us obtain offsets so that we can use eBPF programs to trace functions and set the effective addresses of their parameters.
+这个 **offsets.py** 将帮助我们获取偏移量，以便使用eBPF程序去跟踪函数及其参数时来设定参数的有效地址。
