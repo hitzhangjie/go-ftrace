@@ -126,6 +126,7 @@ func (e *ELF) LineInfoForPc(pc uint64) (filename string, line int, err error) {
 	return lineEntries[idx].File.Name, lineEntries[idx].Line, nil
 }
 
+// FindGoidOffset returns the offset of the goid in runtime.g struct.
 func (e *ELF) FindGoidOffset() (int64, error) {
 	foundRuntimeG := false
 	for die := range e.IterDebugInfo() {

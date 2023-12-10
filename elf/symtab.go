@@ -67,6 +67,8 @@ func (e *ELF) ResolveSymbol(sym string) (symbol elf.Symbol, err error) {
 	return
 }
 
+// FuncOffset returns the offset of function `name` in .text section
+// which is relative to the beginning of the ELF file.
 func (e *ELF) FuncOffset(name string) (offset uint64, err error) {
 	sym, err := e.ResolveSymbol(name)
 	if err != nil {

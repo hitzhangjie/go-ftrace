@@ -17,13 +17,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-var (
-	OffsetPattern *regexp.Regexp
-)
-
-func init() {
-	OffsetPattern = regexp.MustCompile(`\+\d+$`)
-}
+var OffsetPattern = regexp.MustCompile(`\+\d+$`)
 
 type Tracer struct {
 	bin             string

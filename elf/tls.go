@@ -2,6 +2,7 @@ package elf
 
 import "debug/elf"
 
+// FindGOffset returns the runtime.g offset
 func (e *ELF) FindGOffset() (offset int64, err error) {
 	_, symnames, err := e.Symbols()
 	if err != nil {

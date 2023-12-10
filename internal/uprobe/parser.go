@@ -35,23 +35,26 @@ func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
 	wantedFuncs := map[string]interface{}{}
 	attachFuncs := []string{}
 
+	funcs := append(opts.UprobeWildcards, opts.FuncNames...)
 	for _, symbol := range symbols {
 		if debugelf.ST_TYPE(symbol.Info) != debugelf.STT_FUNC {
 			continue
 		}
-		for _, wc := range append(opts.UprobeWildcards, opts.FuncNames...) {
-			if !MatchWildcard(wc, symbol.Name) {
+		for _, fn := range funcs {
+			if !MatchWildcard(fn, symbol.Name) {
 				continue
 			}
 			if opts.ExcludeVendor && strings.Contains(symbol.Name, "/vendor/") {
 				continue
 			}
+			// record the function name that will be traced
 			attachFuncs = append(attachFuncs, symbol.Name)
+			// record the function arguments that will be traced
 			if len(opts.FuncNames) == 0 {
 				wantedFuncs[symbol.Name] = true
 			} else {
-				for _, wc := range opts.FuncNames {
-					if MatchWildcard(wc, symbol.Name) {
+				for _, fn := range opts.FuncNames {
+					if MatchWildcard(fn, symbol.Name) {
 						wantedFuncs[symbol.Name] = true
 						break
 					}

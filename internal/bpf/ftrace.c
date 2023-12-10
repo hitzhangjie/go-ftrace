@@ -36,6 +36,7 @@ struct event
 // force emitting struct event into the ELF.
 const struct event *_ __attribute__((unused));
 
+// fetch 1 arg needs several rules (at most 8 rules), each rule is a struct arg_rule
 struct arg_rule
 {
 	__u8 type;
@@ -46,6 +47,7 @@ struct arg_rule
 	__u8 dereference[8];
 };
 
+// fetch 1 arg needs several rules (at most 8 rules)
 struct arg_rules
 {
 	__u8 length;
