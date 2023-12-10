@@ -4,7 +4,7 @@ import "debug/elf"
 
 // FindGOffset returns the runtime.g offset
 //
-// see: https://o-delve/delve/proc/bininfo.go:setGStructOffsetElf,
+// see: github.com/go-delve/delve/proc/bininfo.go:setGStructOffsetElf,
 //
 // it summarizes how to get the runtime.g offset:
 // This is a bit arcane. Essentially:
@@ -15,7 +15,7 @@ import "debug/elf"
 //   - Otherwise, Go asks the external linker to place the G pointer by
 //     emitting runtime.tlsg, a TLS symbol, which is relocated to the chosen
 //     offset in libc's TLS block.
-//   - On ARM64 (but really, any architecture other than i386 and 86x64) the
+//   - On ARM64 (but really, any architecture other than i386 and x86_64) the
 //     offset is calculated using runtime.tls_g and the formula is different.
 //
 // well, this is a bit hard to master all this kind of history.
