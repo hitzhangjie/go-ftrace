@@ -8,6 +8,7 @@ import (
 	"github.com/pkg/errors"
 )
 
+// Symbols returns the symbols in .symtab section, and a map from symbol name to symbol.
 func (e *ELF) Symbols() (symbols []elf.Symbol, symnames map[string]elf.Symbol, err error) {
 	if _, ok := e.cache["symbols"]; ok {
 		return e.cache["symbols"].([]elf.Symbol), e.cache["symnames"].(map[string]elf.Symbol), nil
@@ -28,6 +29,7 @@ func (e *ELF) Symbols() (symbols []elf.Symbol, symnames map[string]elf.Symbol, e
 	return
 }
 
+// ResolveAddress returns the symbol(s) and offset of the given address.
 func (e *ELF) ResolveAddress(addr uint64) (syms []elf.Symbol, offset uint, err error) {
 	if addr == 0 {
 		err = errors.Wrapf(SymbolNotFoundError, "0")
@@ -44,6 +46,7 @@ func (e *ELF) ResolveAddress(addr uint64) (syms []elf.Symbol, offset uint, err e
 		return
 	}
 
+	// why diff symbol may contains the same addr?
 	sym := symbols[idx-1]
 	for i := idx - 1; i >= 0 && symbols[i].Value == sym.Value; i-- {
 		syms = append(syms, symbols[i])
@@ -54,6 +57,7 @@ func (e *ELF) ResolveAddress(addr uint64) (syms []elf.Symbol, offset uint, err e
 	return syms, uint(addr - sym.Value), nil
 }
 
+// ResolveSymbol returns the symbol with the given name.
 func (e *ELF) ResolveSymbol(sym string) (symbol elf.Symbol, err error) {
 	_, symnames, err := e.Symbols()
 	if err != nil {
@@ -78,6 +82,7 @@ func (e *ELF) FuncOffset(name string) (offset uint64, err error) {
 	return sym.Value - section.Addr + section.Offset, nil
 }
 
+// FuncPcRangeInSymtab returns the lowpc and highpc of function `name` in .symtab section.
 func (e *ELF) FuncPcRangeInSymtab(name string) (lowpc, highpc uint64, err error) {
 	symbols, symnames, err := e.Symbols()
 	if err != nil {

@@ -8,10 +8,17 @@
 #define ENTPOINT 0
 #define RETPOINT 1
 
+// offset of `task_struct->thread_struct->fsbase`, `fsbase` contains the TLS
+// offset. On Linux register `FS` is used to load the TLS base address.
 #define fsbase_off (offsetof(struct task_struct, thread) + offsetof(struct thread_struct, fsbase))
 
 char __license[] SEC("license") = "Dual MIT/GPL";
 
+// bpf config, we need to get goid by reading kernel datastructure with the help of config
+//
+// see: `fsbase_off` helps to read the TLS base address of the current task,
+// then we can get the runtime.g address by reading TLS+g_offset,
+// then we can get the runtime.go->goid by reading TLS+g_offset+goid_offset.
 struct config
 {
 	__s64 goid_offset;
@@ -20,8 +27,14 @@ struct config
 	__u8 padding[7];
 };
 
+// add volatile to avoid compiler optimization (cache data in register),
+// and x86 CPU is strong-consistent ... so on x86 volatile is enough
+// to guarantee the visibility of the data btw tasks.
+//
+// CONFIG is overwritten by `spec.RewriteConstants(map[string]interface{}{"CONFIG": cfg})`
 static volatile const struct config CONFIG = {};
 
+// bpf write event data when enter/exit a function
 struct event
 {
 	__u64 goid;
@@ -125,6 +138,7 @@ static __always_inline
 	return goid;
 }
 
+// read register `reg` data from `ctx` into `regval`
 static __always_inline void read_reg(struct pt_regs *ctx, __u8 reg, __u64 *regval)
 {
 	switch (reg)
@@ -190,29 +204,39 @@ static __always_inline void fetch_args_from_reg(struct pt_regs *ctx, struct arg_
 
 static __always_inline void fetch_args_from_memory(struct pt_regs *ctx, struct arg_data *data, struct arg_rule *rule)
 {
+	// first read the address from register (well, it maybe a immediate value)
 	__u64 addr = 0;
 	read_reg(ctx, rule->reg, &addr);
 
+	// then do other addressing rules
 	for (int i = 0; i < 8 && i < rule->length; i++)
 	{
+		// if expr = *+8(+2(%eax)), for *+8 part, we need to dereference the address
 		if (rule->dereference[i] == 1)
 		{
 			bpf_probe_read_user(&addr, sizeof(addr), (void *)addr + rule->offsets[i]);
 		}
+		// if the rule is +2 part, then we just add the offset to the address
 		else
 		{
 			addr += rule->offsets[i];
 		}
 	}
+
+	// finally, we got the EA (effective address), then read the data from it,
+	// make sure the data size is not larger than MAX_DATA_SIZE
 	bpf_probe_read_user(&data->data,
 						rule->size < MAX_DATA_SIZE ? rule->size : MAX_DATA_SIZE,
 						(void *)addr);
+	// put the read data into the queue
 	bpf_map_push_elem(&arg_queue, data, BPF_EXIST);
 	return;
 }
 
+// fetch arguments by rules
 static __always_inline void fetch_args(struct pt_regs *ctx, __u64 goid, __u64 ip)
 {
+	// first get the rules by ip if we have
 	struct arg_rules *rules = bpf_map_lookup_elem(&arg_rules_map, &ip);
 	if (!rules)
 		return;
@@ -258,8 +282,7 @@ int ent(struct pt_regs *ctx)
 	else if (!bpf_map_lookup_elem(&should_trace_goid, &e->goid))
 	{
 		__u64 should_trace = true;
-		bpf_map_update_elem(&should_trace_goid, &e->goid, &should_trace,
-							BPF_ANY);
+		bpf_map_update_elem(&should_trace_goid, &e->goid, &should_trace, BPF_ANY);
 	}
 
 	e->location = ENTPOINT;

@@ -8,6 +8,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// Handle handles the event
 func (m *EventManager) Handle(event bpf.GoftraceEvent) (err error) {
 	m.Add(event)
 	log.Debugf("added event: %+v", event)
@@ -25,6 +26,7 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) {
 	if length == 0 && event.Location != 0 {
 		return
 	}
+	// get the associated uprobe
 	uprobe, err := m.GetUprobe(event)
 	if err != nil {
 		log.Errorf("failed to get uprobe for event %+v: %+v", event, err)
@@ -45,7 +47,7 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) {
 			return
 		}
 	}
-
+	// we need to fetch `len(uprobe.FetchArgs)` args
 	args := []string{}
 	for _, fetchArg := range uprobe.FetchArgs {
 		for m.goArgs[event.Goid] == nil {
@@ -55,21 +57,28 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) {
 		if len(args) > 0 {
 			args = append(args, ", ")
 		}
+		// varname = value
 		args = append(args, fetchArg.Varname, "=", fetchArg.SprintValue(arg.Data[:]))
 	}
+	// append new event
 	m.goEvents[event.Goid] = append(m.goEvents[event.Goid], Event{
 		GoftraceEvent: event,
 		uprobe:        &uprobe,
 		argString:     strings.Join(args, ""),
 	})
 	switch event.Location {
-	case 0:
+	case 0: // entry
 		m.goEventStack[event.Goid]++
-	case 1:
+	case 1: // ret
 		m.goEventStack[event.Goid]--
 	}
 }
 
+// CloseStack it means the traced function and its children functions
+// have returned on the goroutine stack, so we can print the stack now.
+//
+// And later the goroutine may call other functions, and the stack will
+// be expanded and shrinked again, and we will print the stack again, too.
 func (m *EventManager) CloseStack(event bpf.GoftraceEvent) bool {
 	return m.goEventStack[event.Goid] == 0 && len(m.goEvents[event.Goid]) > 0
 }

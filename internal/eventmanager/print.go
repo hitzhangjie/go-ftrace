@@ -5,22 +5,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/hitzhangjie/go-ftrace/internal/uprobe"
 )
 
 const placeholder = "        "
 
-func (m *EventManager) SprintCallChain(event Event) (chain string, err error) {
-	if event.CallerIp == 0 {
-		return "", nil
-	}
-	syms, off, err := m.elf.ResolveAddress(event.CallerIp)
-	if err != nil {
-		return
-	}
-	return fmt.Sprintf("%s+%d", syms[0].Name, off), nil
-}
-
+// PrintStack print the callstack of a traced function
 func (m *EventManager) PrintStack(goid uint64) (err error) {
 	indent := ""
 	fmt.Println()
@@ -44,7 +35,14 @@ func (m *EventManager) PrintStack(goid uint64) (err error) {
 				lineInfo = fmt.Sprintf("%s:%d", filename, line)
 			}
 
-			fmt.Printf("%s %s %s %s(%s) { %s %s\n", t, placeholder, indent, event.uprobe.Funcname, event.argString, callChain, lineInfo)
+			fmt.Printf("%s %s %s %s(%s) { %s %s\n",
+				color.YellowString(t),
+				placeholder,
+				indent,
+				color.RedString(event.uprobe.Funcname),
+				color.MagentaString(event.argString),
+				color.GreenString(callChain),
+				color.CyanString(lineInfo))
 			indent += "  "
 
 		case 1: // retpoint
@@ -57,11 +55,27 @@ func (m *EventManager) PrintStack(goid uint64) (err error) {
 			elapsed := event.TimeNs - startTimeStack[len(startTimeStack)-1]
 			startTimeStack = startTimeStack[:len(startTimeStack)-1]
 			indent = indent[:len(indent)-2]
-			fmt.Printf("%s %08.4f %s } %s+%d %s\n", t, time.Duration(elapsed).Seconds(), indent, syms[0].Name, offset, lineInfo)
+			fmt.Printf("%s %08.4f %s } %s+%d %s\n",
+				color.YellowString(t),
+				time.Duration(elapsed).Seconds(),
+				indent,
+				color.RedString(syms[0].Name),
+				offset,
+				color.CyanString(lineInfo))
 		}
-
 	}
 	return
+}
+
+func (m *EventManager) SprintCallChain(event Event) (chain string, err error) {
+	if event.CallerIp == 0 {
+		return "", nil
+	}
+	syms, off, err := m.elf.ResolveAddress(event.CallerIp)
+	if err != nil {
+		return
+	}
+	return fmt.Sprintf("%s+%d", syms[0].Name, off), nil
 }
 
 func (m *EventManager) SprintArg(arg *uprobe.FetchArg, data []uint8) (_ string, err error) {

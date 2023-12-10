@@ -1,10 +1,10 @@
 package elf
 
 import (
-	"github.com/pkg/errors"
 	"golang.org/x/arch/x86/x86asm"
 )
 
+// FuncInstructions returns the instructions of function `name` in ELF file
 func (e *ELF) FuncInstructions(name string) (insts []x86asm.Inst, addr, offset uint64, err error) {
 	raw, addr, offset, err := e.FuncRawInstructions(name)
 	if err != nil {
@@ -13,6 +13,9 @@ func (e *ELF) FuncInstructions(name string) (insts []x86asm.Inst, addr, offset u
 	return e.ResolveInstructions(raw), addr, offset, nil
 }
 
+// FuncRetOffsets returns the offsets of RET instructions of function `name` in ELF file
+//
+// Note: there may be multiple RET instructions in a function, so we return a slice of offsets
 func (e *ELF) FuncRetOffsets(name string) (offsets []uint64, err error) {
 	insts, _, offset, err := e.FuncInstructions(name)
 	if err != nil {
@@ -28,27 +31,7 @@ func (e *ELF) FuncRetOffsets(name string) (offsets []uint64, err error) {
 	return
 }
 
-func (e *ELF) FuncFramePointerOffset(name string) (offset uint64, err error) {
-	insts, _, offset, err := e.FuncInstructions(name)
-	if err != nil {
-		return
-	}
-
-	bp := 0
-	for _, inst := range insts {
-		offset += uint64(inst.Len)
-		for _, a := range inst.Args {
-			if a != nil && a.String() == "RBP" {
-				bp++
-				if bp == 2 {
-					return offset, nil
-				}
-			}
-		}
-	}
-	return 0, errors.Wrap(FramePointerNotFoundErr, name)
-}
-
+// ResolveInstructions resolves the bytes to x86 instructions
 func (e *ELF) ResolveInstructions(bytes []byte) (insts []x86asm.Inst) {
 	if len(bytes) == 0 {
 		return

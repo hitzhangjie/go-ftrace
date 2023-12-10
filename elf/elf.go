@@ -8,6 +8,7 @@ import (
 	"github.com/go-delve/delve/pkg/dwarf/godwarf"
 )
 
+// ELF ELF file
 type ELF struct {
 	bin       string
 	binFile   *os.File
@@ -17,6 +18,7 @@ type ELF struct {
 	cache map[string]interface{}
 }
 
+// New create a new ELF file
 func New(bin string) (_ *ELF, err error) {
 	binFile, err := os.Open(bin)
 	if err != nil {

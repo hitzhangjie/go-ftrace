@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"regexp"
 	"strings"
 
 	"github.com/hitzhangjie/go-ftrace/elf"
@@ -17,8 +16,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-var OffsetPattern = regexp.MustCompile(`\+\d+$`)
-
+// Tracer ELF bpf tracer
 type Tracer struct {
 	bin             string
 	elf             *elf.ELF
@@ -37,22 +35,24 @@ func NewTracer(bin string, excludeVendor bool, uprobeWildcards, fetch []string) 
 		return
 	}
 
-	return &Tracer{
+	tracer := &Tracer{
 		bin:             bin,
 		elf:             elf,
 		excludeVendor:   excludeVendor,
 		uprobeWildcards: uprobeWildcards,
 		fetch:           fetch,
-
-		bpf: bpf.New(),
-	}, nil
+		bpf:             bpf.New(),
+	}
+	return tracer, nil
 }
 
 // Parse parse the args `ftrace [flags] binary <args>`
 //
 // @return funcs    : the function names to trace
-// @return fetchArgs: the function name => parameters (parameter name => parameter <expr>:<type>)
+// @return fetchArgs: the function name => parameters (parameter name => parameter <EA_expr>:<type>)
 // @return err      : return err if <args> is invalid
+//
+// Here `EA_expr` is the expression of effective address, based on register and memory addressing mode.
 func (t *Tracer) Parse() (funcs []string, fetchArgs map[string]map[string]string, err error) {
 	fetchArgs = map[string]map[string]string{}
 	for _, s := range t.fetch {
@@ -111,11 +111,13 @@ func (t *Tracer) Parse() (funcs []string, fetchArgs map[string]map[string]string
 	return
 }
 
+// Start start tracing
 func (t *Tracer) Start() (err error) {
 	funcs, fetchArgs, err := t.Parse()
 	if err != nil {
 		return
 	}
+	// parse uprobes
 	uprobes, err := uprobe.Parse(t.elf, &uprobe.ParseOptions{
 		ExcludeVendor:   t.excludeVendor,
 		UprobeWildcards: t.uprobeWildcards,
@@ -126,6 +128,7 @@ func (t *Tracer) Start() (err error) {
 		return
 	}
 
+	// let user confirm yes/no to trace
 requireConfirm:
 	fmt.Fprintf(os.Stdout, "found %d uprobes, large number of uprobes (>1000) need long time for attaching and detaching, continue? [Y/n]\n", len(uprobes))
 	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
@@ -141,6 +144,7 @@ requireConfirm:
 		goto requireConfirm
 	}
 
+	// find the runtime.g->goid offset, and runtime.g offset to TLS
 	goidOffset, err := t.elf.FindGoidOffset()
 	if err != nil {
 		return
@@ -151,13 +155,15 @@ requireConfirm:
 	}
 	log.Debugf("offset of goid from g is %d, offset of g from fs is -0x%x\n", goidOffset, -gOffset)
 
-	// load bpf programme and attach uprobes
+	// load bpf programme and setup bpf programme config
 	if err = t.bpf.Load(uprobes, bpf.LoadOptions{
 		GoidOffset: goidOffset,
 		GOffset:    gOffset,
 	}); err != nil {
 		return
 	}
+
+	// attach uprobes (and detach when exit)
 	if err = t.bpf.Attach(t.bin, uprobes); err != nil {
 		return
 	}
@@ -165,15 +171,15 @@ requireConfirm:
 	defer t.bpf.Detach()
 	log.Info("start tracing\n")
 
+	// exit when receive SIGINT
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// poll result and print
+	// create eventmanager to poll events, prepare the callstack and print
 	eventManager, err := eventmanager.New(uprobes, t.elf, t.bpf.PollArg(ctx))
 	if err != nil {
 		return
 	}
-
 	for event := range t.bpf.PollEvents(ctx) {
 		if err = eventManager.Handle(event); err != nil {
 			return

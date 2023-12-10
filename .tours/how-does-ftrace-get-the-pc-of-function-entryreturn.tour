@@ -1,0 +1,77 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "how does ftrace get the 'pc' of function entry/return?",
+  "steps": [
+    {
+      "file": "cmd/root.go",
+      "description": "ftrace -u <regexp> <app> <fetchArgsRule>\n\n以上面的命令为例，app是包含了DWARF调试信息的go程序，\n- regexp，将在后续遍历app中的所有函数定义时用于匹配，以决定哪些函数将被用于uprobe跟踪；\n- fetchArgsRule，这是获取函数的参数用的，意味着至少可以提取出一个具体的函数，它也可以用于uprobe跟踪；\n\n接下来看下怎么从DWARF中提取所有函数定义信息的，以及如何正则匹配的，如何获取到函数entry、return地址的。",
+      "line": 66
+    },
+    {
+      "file": "elf/elf.go",
+      "description": "这里的 `package godwarf` 是提取自go-delve/delve，标准库中提供了对DWARF的部分支持，但是没那么方便。\n调试器delve中有大量的DWARF工具函数，所以直接使用delve中的package来操作，可以省掉很多工作量。、\n\nDWARF调试信息会分布在不同的ELF sections中，以 `.[z]debug_` 开头，简要说明下：\n- .debug_abbrev, 存储.debug_info中使用的缩写信息；\n- .debug_arranges, 存储一个加速访问的查询表，通过内存地址查询对应编译单元信息；\n- .debug_frame, 存储调用栈帧信息；\n- .debug_info, 存储核心DWARF数据，包含了描述变量、代码等的DIEs；\n- .debug_line, 存储行号表程序 (程序指令由行号表状态机执行，执行后构建出完整的行号表)\n- .debug_loc, 存储location描述信息；\n- .debug_macinfo, 存储宏相关描述信息；\n- .debug_pubnames, 存储一个加速访问的查询表，通过名称查询全局对象和函数；\n- .debug_pubtypes, 存储一个加速访问的查询表，通过名称查询全局类型；\n- .debug_ranges, 存储DIEs中引用的address ranges；\n- .debug_str, 存储.debug_info中引用的字符串表，也是通过偏移量来引用；\n- .debug_types, 存储描述数据类型相关的DIEs；\n\n`package godwarf` 疑似需要所有这些数据去构造完整的dwarfData，但是实际上开发这个程序不一定要取出所有的DWARF sections。\n只是因为用了这个delve的包，所以才全取出。",
+      "line": 43
+    },
+    {
+      "file": "cmd/root.go",
+      "description": "这里设置了ftrace进程的一些限制：锁定内存大小无限制，打开文件数量100w+。\n\n为什么这么做呢？\n- 锁定内存，这部分内存是内存中的特殊区域，是不能被换出到磁盘的，即使内存有压力的时候也是。这对一些对性能比较敏感的程序来说很重要。\n  ftrace作为一个高性能的tracing工具，你不会希望它因为内存换入换出而出现delay吧，那它跟踪其他程序的作用也就没办法保证了。\n- 打开文件，为什么会打开文件数量比较多呢？看上去会打开一个待分析程序的二进制，还有其他的吗？\n  可能会读取一些so信息？可能会读写内核/proc中的信息？还可能会……",
+      "line": 112
+    },
+    {
+      "file": "cmd/tracer.go",
+      "description": "`t.Parse()` 这个函数很关键，它解析了有哪些函数要跟踪，以及哪些函数的哪个参数要跟踪，以及这个参数的寻址方式（表达式）是什么。\n\n这里的所谓寻址方式，就是计算机组成原理里面讲过的，通过寄存器、偏移量、指针操作来描述出某个对象的有效地址。\n当然也可能很简单，比如寄存器里面存着的立即数。",
+      "line": 121
+    },
+    {
+      "file": "internal/uprobe/parser.go",
+      "description": "parseFetchArgs，会将待跟踪的函数参数的EA表达式，解析成一步一步可落地的有效地址的计算。\n- 比如第一条是寄存器规则（register），寄存器里面要么是立即数，要么是对象起始地址；\n- 如果寄存器里是对象起始地址，后面可能会配合着一些其他栈规则（stack），来访问对象中的成员信息，当然这里用stack太狭隘了，可能寄存器中存的对象地址是指向堆区的（heap），严格来说这里应该是内存访问规则。\n\n总之吧，会将EA有效地址的表达式转换为一个数组，数组中每一个表示寄存器规则，或者内存规则，第一条肯定是寄存器规则，有剩下的就是内存规则。",
+      "line": 25
+    },
+    {
+      "file": "internal/uprobe/parser.go",
+      "description": "取出go程序中定义的所有符号信息，这里主要是要理解ELF文件中的.symtab以及.strtab",
+      "line": 30
+    },
+    {
+      "file": "internal/uprobe/parser.go",
+      "description": "这里检查下symbol.Name是否与我们提供的-u或者fetcharg规则中的函数名规则匹配，匹配则记录下来。\n\n注意这里为什么是自定义了MatchWildcard函数，而不是直接用正则表达式来匹配呢？\n正则和普通的wildcard的方式还是有差异的，正则比较麻烦，没wildcard那么直观。\n\n比如main.add*，按正则的话不会匹配main.add1, main.add2，得协程main.add.*才行，因为*表示重复任意次数的意思，而非任意字符。\n但是通配符wildcard的方式，更符合直觉，更容易写。",
+      "line": 44
+    },
+    {
+      "file": "internal/uprobe/parser.go",
+      "description": "为每一个要trace的函数，分别为其生成entry、return的uprobe，重点关注如下几点：\n- 一个uprobe需要指定函数名、函数入口地址（符号表符号直接取）、相对于ELF开头的偏移量，跟踪位置相对于函数起始点的偏移量；\n- 函数退出时，执行返回指令时的地址可不止一个，每个函数可能有多个return语句，每个返回地址都可以单独设置；\n  因此会为每个RET指令地址处设置一个uprobe，注意下这里。\n\n再其他的就是我们为uprobe设置了fetcharg、wanted参数，如果有的函数是我们想跟踪其参数信息的，通过这个可以区分出来。",
+      "line": 97
+    },
+    {
+      "file": "cmd/tracer.go",
+      "description": "- 这里显示通过DWARF拿到runtime.g->goid相对于runtime.g结构体开头的偏移量，\n- 然后又计算runtime.g的偏移量",
+      "line": 144
+    },
+    {
+      "file": "cmd/tracer.go",
+      "description": "TODO Load the bpf programme written in C and compiled to bpf *.o\n",
+      "line": 155
+    },
+    {
+      "file": "internal/bpf/ftrace.c",
+      "description": "goid就是这么取出来的，前面算出来runtime.g相对于tls的偏移量，也算出来了goid相对于runtime.g的偏移量。\n\n这个偏移量信息写入到了bpf maps[\"config\"]中，这里就是在ebpf程序运行起来后，尝试去根据这里的偏移量去各个协程goid的值。\n先找到当前thread的tls，然后从中根据g_offset读取g的地址，然后再根据goid_offset读取goid的信息。\n\ngoid就到手了。\n\n注意：这里的task+fsbase_off实际上已经是thread_struct->fsbase这个字段了，这里保存的是线程的TLS信息。\n所以从这里能读取出TLS基地址信息，然后就能独处runtime.g的其实地址，进而就能拿到runtime.g->goid的信息。",
+      "line": 116
+    },
+    {
+      "file": "cmd/tracer.go",
+      "description": "开始通过系统调用bpf请求内核添加uprobes",
+      "line": 161
+    },
+    {
+      "file": "internal/bpf/bpf.go",
+      "description": "Attach，遍历所有之前确定下来的uprobes，然后请求内核添加uprobes：“在指定函数入口、退出pc处，给我添加一个uprobe，回调我指定的程序prog”。\n\n这里的prog是通过写了c代码后，通过代码自动生成关联起来的。",
+      "line": 149
+    },
+    {
+      "file": "cmd/tracer.go",
+      "description": "Poll the events from the ebpf maps",
+      "line": 184
+    }
+  ],
+  "ref": "master"
+}

@@ -30,3 +30,7 @@ By running this command, the BTF information from the vmlinux kernel image is ex
 
 The relationship between these files is that they are all used together in BPF programming. vmlinux.h provides the definitions of kernel data structures, while bpf_helper_defs.h and bpf_helpers.h provide the means for BPF programs to interact with the Linux kernel. They are all part of the infrastructure that allows BPF programs to operate.
 
+### where does this code comes?
+
+- go-delve/delve/pkg/proc/internal/ebpf
+- other bpf demos

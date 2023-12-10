@@ -8,6 +8,7 @@ import (
 	"github.com/pkg/errors"
 )
 
+// IterDebugInfo iterates the DIE entries in .[z]debug_info in ELF file
 func (e *ELF) IterDebugInfo() <-chan *dwarf.Entry {
 	ch := make(chan *dwarf.Entry)
 	go func() {
@@ -24,6 +25,7 @@ func (e *ELF) IterDebugInfo() <-chan *dwarf.Entry {
 	return ch
 }
 
+// NonInlinedSubprogramDIEs returns the DIE entries of non-inlined subprograms
 func (e *ELF) NonInlinedSubprogramDIEs() (dies map[string]*dwarf.Entry, err error) {
 	if v, ok := e.cache["subprogramdies"]; ok {
 		return v.(map[string]*dwarf.Entry), nil
@@ -52,6 +54,10 @@ func (e *ELF) NonInlinedSubprogramDIEs() (dies map[string]*dwarf.Entry, err erro
 				continue
 			}
 
+			// maybe the same function:
+			// - is inlined? so .symtab doesn't contain it
+			// - is tripped from .symtab by linker
+			// - others?
 			sym, ok := symnames[name]
 			if !ok {
 				continue
@@ -66,6 +72,7 @@ func (e *ELF) NonInlinedSubprogramDIEs() (dies map[string]*dwarf.Entry, err erro
 	return dies, nil
 }
 
+// FuncPcRangeInDwarf returns the lowpc and highpc of function `funcname` in .[z]debug_info
 func (e *ELF) FuncPcRangeInDwarf(funcname string) (lowpc, highpc uint64, err error) {
 	dies, err := e.NonInlinedSubprogramDIEs()
 	if err != nil {
@@ -79,6 +86,10 @@ func (e *ELF) FuncPcRangeInDwarf(funcname string) (lowpc, highpc uint64, err err
 	}
 
 	lowpc = die.Val(dwarf.AttrLowpc).(uint64)
+
+	// In DWARF version 5, the AttrHighpc attribute has been modified.
+	// In previous versions, AttrHighpc was an absolute address, but in
+	// DWARF version 5, it can also be a relative offset from AttrLowpc.
 	switch v := die.Val(dwarf.AttrHighpc).(type) {
 	case uint64:
 		highpc = v
@@ -88,6 +99,7 @@ func (e *ELF) FuncPcRangeInDwarf(funcname string) (lowpc, highpc uint64, err err
 	return
 }
 
+// LineEntries returns the line entries in .[z]debug_line in ELF file
 func (e *ELF) LineEntries() (lineEntries []dwarf.LineEntry, err error) {
 	if v, ok := e.cache["lineEntries"]; ok {
 		return v.([]dwarf.LineEntry), nil
@@ -117,6 +129,7 @@ func (e *ELF) LineEntries() (lineEntries []dwarf.LineEntry, err error) {
 	return
 }
 
+// LineInfoForPc returns the filename and line number of pc in ELF file
 func (e *ELF) LineInfoForPc(pc uint64) (filename string, line int, err error) {
 	lineEntries, err := e.LineEntries()
 	if err != nil {
@@ -127,6 +140,8 @@ func (e *ELF) LineInfoForPc(pc uint64) (filename string, line int, err error) {
 }
 
 // FindGoidOffset returns the offset of the goid in runtime.g struct.
+//
+// find DIE runtime.g, then find its member Attribute 'goid'.
 func (e *ELF) FindGoidOffset() (int64, error) {
 	foundRuntimeG := false
 	for die := range e.IterDebugInfo() {

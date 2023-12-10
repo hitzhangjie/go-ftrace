@@ -12,24 +12,27 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// Event represents a fun enter/ret event, see ftrace.c event
 type Event struct {
 	bpf.GoftraceEvent
 	uprobe    *uprobe.Uprobe
 	argString string
 }
 
+// EventManager manages events
 type EventManager struct {
 	elf     *elf.ELF
 	argCh   <-chan bpf.GoftraceArgData
 	uprobes map[string]uprobe.Uprobe
 
-	goEvents     map[uint64][]Event
+	goEvents     map[uint64][]Event // k=goid,v=[]event
 	goEventStack map[uint64]uint64
 	goArgs       map[uint64]chan bpf.GoftraceArgData
 
 	bootTime time.Time
 }
 
+// New create a new EventManager, which receives events via `ch`
 func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GoftraceArgData) (_ *EventManager, err error) {
 	host, err := sysinfo.Host()
 	if err != nil {
@@ -53,6 +56,7 @@ func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GoftraceArgData) (
 	return m, err
 }
 
+// dispatches events belonging to the same goroutine to the same channel key'd by goid
 func (m *EventManager) handleArg() {
 	for arg := range m.argCh {
 		if _, ok := m.goArgs[arg.Goid]; !ok {
@@ -63,6 +67,7 @@ func (m *EventManager) handleArg() {
 	}
 }
 
+// GetUprobe returns the uprobe of the given event
 func (m *EventManager) GetUprobe(event bpf.GoftraceEvent) (_ uprobe.Uprobe, err error) {
 	syms, offset, err := m.elf.ResolveAddress(event.Ip)
 	if err != nil {
