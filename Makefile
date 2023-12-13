@@ -11,3 +11,4 @@ all:
 install:
 	cd cmd/ftrace && go install -v
 	sudo ln -sf ~/go/bin/ftrace /usr/sbin
+	sudo chmod u+s /usr/sbin/ftrace
