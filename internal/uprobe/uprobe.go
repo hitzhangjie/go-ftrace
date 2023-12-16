@@ -9,17 +9,11 @@ const (
 )
 
 type Uprobe struct {
-	Funcname string
-	// absolute address of the function entry
-	Address uint64
-	// absolute offset to the binary entry (ELF file beginning)
-	AbsOffset uint64
-	// relative to the function entry
-	RelOffset uint64
-	// location of the probe
-	Location UprobeLocation
-	// fetch arguments
-	FetchArgs []*FetchArg
-
-	Wanted bool
+	Funcname  string
+	Address   uint64         // absolute address of the function entry
+	AbsOffset uint64         // absolute offset to the binary entry (ELF file beginning)
+	RelOffset uint64         // relative to the function entry
+	Location  UprobeLocation // location of the probe
+	FetchArgs []*FetchArg    // fetch arguments
+	Wanted    bool
 }
