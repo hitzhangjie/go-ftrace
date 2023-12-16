@@ -82,18 +82,20 @@ func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
 	for _, funcname := range attachFuncs {
 		message := &bytes.Buffer{}
 		fmt.Fprintf(message, "add uprobes for %s: ", funcname)
+
 		sym, err := elf.ResolveSymbol(funcname)
 		if err != nil {
 			return nil, err
 		}
 
-		// uprobes for function entry
 		entOffset, err := elf.FuncOffset(funcname)
 		if err != nil {
 			return nil, err
 		}
 		_, wanted := wantedFuncs[funcname]
 		fmt.Fprintf(message, "0x%x -> ", entOffset)
+
+		// uprobes for function entry
 		uprobes = append(uprobes, Uprobe{
 			Funcname:  funcname,
 			Location:  AtEntry,
