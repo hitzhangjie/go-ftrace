@@ -12,7 +12,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// Event represents a fun enter/ret event, see ftrace.c event
+// Event represents a func enter/ret event, see ftrace.c event
 type Event struct {
 	bpf.GoftraceEvent
 	uprobe    *uprobe.Uprobe
