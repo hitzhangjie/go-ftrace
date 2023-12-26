@@ -23,13 +23,17 @@ type Tracer struct {
 	excludeVendor   bool
 	uprobeWildcards []string
 	fetch           []string
+	drilldown       string
 
 	bpf *bpf.BPF
 }
 
 // NewTracer create a new tracer for ELF executable `bin`, it attach uprobes listed in `uprobeWildcards`,
 // and output statistics of functions filtered by fetch
-func NewTracer(bin string, excludeVendor bool, uprobeWildcards, fetch []string) (_ *Tracer, err error) {
+//
+// `drilldown` means only show the callstack of the specified function.
+// TODO should we define it as a wildcast pattern, maybe a []string or []patterns?
+func NewTracer(bin string, excludeVendor bool, uprobeWildcards, fetch []string, drilldown string) (_ *Tracer, err error) {
 	elf, err := elf.New(bin)
 	if err != nil {
 		return
@@ -41,6 +45,7 @@ func NewTracer(bin string, excludeVendor bool, uprobeWildcards, fetch []string) 
 		excludeVendor:   excludeVendor,
 		uprobeWildcards: uprobeWildcards,
 		fetch:           fetch,
+		drilldown:       drilldown,
 		bpf:             bpf.New(),
 	}
 	return tracer, nil
@@ -176,7 +181,7 @@ requireConfirm:
 	defer stop()
 
 	// create eventmanager to poll events, prepare the callstack and print
-	eventManager, err := eventmanager.New(uprobes, t.elf, t.bpf.PollArg(ctx))
+	eventManager, err := eventmanager.New(uprobes, t.drilldown, t.elf, t.bpf.PollArg(ctx))
 	if err != nil {
 		return
 	}

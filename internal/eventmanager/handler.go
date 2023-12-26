@@ -9,16 +9,30 @@ import (
 )
 
 // Handle handles the event
-func (m *EventManager) Handle(event bpf.GoftraceEvent) (err error) {
+func (m *EventManager) Handle(event bpf.GoftraceEvent) error {
 	m.Add(event)
 	log.Debugf("added event: %+v", event)
 	if m.CloseStack(event) {
-		if err = m.PrintStack(event.Goid); err != nil {
+		// drilldown特定函数
+		if m.drilldown != "" {
+			syms, _, err := m.elf.ResolveAddress(event.Ip)
+			if err != nil {
+				m.ClearStack(event)
+				return err
+			}
+			fnName := syms[0].Name
+			if fnName != m.drilldown {
+				m.ClearStack(event)
+				return nil
+			}
+		}
+
+		if err := m.PrintStack(event.Goid); err != nil {
 			return err
 		}
 		m.ClearStack(event)
 	}
-	return
+	return nil
 }
 
 func (m *EventManager) Add(event bpf.GoftraceEvent) {
