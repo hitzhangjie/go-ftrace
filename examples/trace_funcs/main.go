@@ -6,6 +6,12 @@ import (
 )
 
 func main() {
+	go func() {
+		for {
+			time.Sleep(time.Second)
+			add3(1, 1)
+		}
+	}()
 	for {
 		doSomething()
 	}
