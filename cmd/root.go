@@ -68,8 +68,9 @@ var rootCmd = &cobra.Command{
 		fetch := args[1:]
 		excludeVendor, _ := cmd.Flags().GetBool("exclude-vendor")
 		uprobeWildcards, _ := cmd.Flags().GetStringSlice("uprobe-wildcards")
+		drilldown, _ := cmd.Flags().GetString("drilldown")
 
-		tracer, err := NewTracer(bin, excludeVendor, uprobeWildcards, fetch)
+		tracer, err := NewTracer(bin, excludeVendor, uprobeWildcards, fetch, drilldown)
 		if err != nil {
 			return err
 		}
@@ -103,8 +104,10 @@ func init() {
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 
 	rootCmd.Flags().BoolP("debug", "d", false, "enable debug logging")
-	rootCmd.Flags().BoolP("exclude-vendor", "x", true, "exclude vendor")
+
 	rootCmd.Flags().StringSliceP("uprobe-wildcards", "u", nil, "wildcards for code to add uprobes")
+	rootCmd.Flags().BoolP("exclude-vendor", "x", true, "exclude vendor")
+	rootCmd.Flags().StringP("drilldown", "D", "", "drill down analysis")
 
 	rootCmd.MarkFlagRequired("uprobe-wildcards")
 }
