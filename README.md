@@ -154,7 +154,7 @@ detaching 16/16
 
 # Design & Implemention
 
-If you're interested in the implmention internals, please read: [go-ftrace internals](https://www.hitzhangjie.pro/blog/2023-12-12-%E8%A7%82%E6%B5%8Bgo%E5%87%BD%E6%95%B0%E8%B0%83%E7%94%A8go-ftrace-%E8%AE%BE%E8%AE%A1%E5%AE%9E%E7%8E%B0/).
+If you're interested in the implmention internals, please read: [go-ftrace internals](https://www.hitzhangjie.pro/blog/2023-12-12-%E8%A7%82%E6%B5%8Bgo%E5%87%BD%E6%95%B0%E8%B0%83%E7%94%A8go-ftrace%E8%AE%BE%E8%AE%A1%E5%AE%9E%E7%8E%B0/).
 
 # Acknowledgments
 

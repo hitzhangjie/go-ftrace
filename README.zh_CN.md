@@ -147,7 +147,7 @@ detaching 16/16
 
 # 设计实现
 
-如果对go-ftrace的设计实现感兴趣，请阅读 [go-ftrace设计实现](https://www.hitzhangjie.pro/blog/2023-12-12-%E8%A7%82%E6%B5%8Bgo%E5%87%BD%E6%95%B0%E8%B0%83%E7%94%A8go-ftrace-%E8%AE%BE%E8%AE%A1%E5%AE%9E%E7%8E%B0/) 来了解更多。
+如果对go-ftrace的设计实现感兴趣，请阅读 [go-ftrace设计实现](https://www.hitzhangjie.pro/blog/2023-12-12-%E8%A7%82%E6%B5%8Bgo%E5%87%BD%E6%95%B0%E8%B0%83%E7%94%A8go-ftrace%E8%AE%BE%E8%AE%A1%E5%AE%9E%E7%8E%B0/) 来了解更多。
 
 # 致谢
 
