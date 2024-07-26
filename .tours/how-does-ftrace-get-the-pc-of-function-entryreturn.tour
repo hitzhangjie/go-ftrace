@@ -54,7 +54,7 @@
     },
     {
       "file": "internal/bpf/ftrace.c",
-      "description": "goid就是这么取出来的，前面算出来runtime.g相对于tls的偏移量，也算出来了goid相对于runtime.g的偏移量。\n\n这个偏移量信息写入到了bpf maps[\"config\"]中，这里就是在ebpf程序运行起来后，尝试去根据这里的偏移量去各个协程goid的值。\n先找到当前thread的tls，然后从中根据g_offset读取g的地址，然后再根据goid_offset读取goid的信息。\n\ngoid就到手了。\n\n注意：这里的task+fsbase_off实际上已经是thread_struct->fsbase这个字段了，这里保存的是线程的TLS信息。\n所以从这里能读取出TLS基地址信息，然后就能独处runtime.g的其实地址，进而就能拿到runtime.g->goid的信息。",
+      "description": "goid就是这么取出来的，前面算出来runtime.g相对于tls的偏移量，也算出来了goid相对于runtime.g的偏移量。\n\n这个偏移量信息写入到了bpf maps[\"config\"]中，这里就是在ebpf程序运行起来后，尝试去根据这里的偏移量去各个协程goid的值。\n先找到当前thread的tls，然后从中根据g_offset读取g的地址，然后再根据goid_offset读取goid的信息。\n\ngoid就到手了。\n\n注意：这里的task+fsbase_off实际上已经是thread_struct->fsbase这个字段了，这里保存的是线程的TLS信息。\n所以从这里能读取出TLS基地址信息，然后就能读出runtime.g的起始地址，进而就能拿到runtime.g->goid的信息。",
       "line": 116
     },
     {
