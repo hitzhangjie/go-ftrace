@@ -13,24 +13,27 @@ func (m *EventManager) Handle(event bpf.GoftraceEvent) error {
 	m.Add(event)
 	log.Debugf("added event: %+v", event)
 	if m.CloseStack(event) {
+		// 有错没错都要清空栈
+		defer m.ClearStack(event)
+
+		var needPrint bool
+
 		// drilldown特定函数
-		if m.drilldown != "" {
+		if m.drilldown == "" {
+			needPrint = true
+		} else {
 			syms, _, err := m.elf.ResolveAddress(event.Ip)
 			if err != nil {
-				m.ClearStack(event)
 				return err
 			}
 			fnName := syms[0].Name
-			if fnName != m.drilldown {
-				m.ClearStack(event)
-				return nil
-			}
+			needPrint = (fnName == m.drilldown)
 		}
 
-		if err := m.PrintStack(event.Goid); err != nil {
-			return err
+		if !needPrint {
+			return nil
 		}
-		m.ClearStack(event)
+		return m.PrintStack(event.Goid)
 	}
 	return nil
 }
