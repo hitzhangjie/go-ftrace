@@ -11,4 +11,11 @@ all:
 install:
 	cd cmd/ftrace && go install -v
 	sudo ln -sf ~/go/bin/ftrace /usr/sbin
+	sudo chown root:root ~/go/bin/ftrace
 	sudo chmod u+s /usr/sbin/ftrace
+
+clean:
+	rm -f ~/go/bin/ftrace
+	sudo rm -rf /usr/sbin/ftrace
+
+.PHONY: clean
