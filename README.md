@@ -78,7 +78,7 @@ sudo ftrace -u 'main.(*Student).String' ./main
 ```
 
 Automatic fetching is on by default, and arguments and return values can be
-toggled independently via `--auto-fargs` and `--auto-frets`:
+toggled independently via `--fargs-auto` and `--frets-auto`:
 
 - arguments map to registers `ax, bx, cx, di, si, r8, ...` in declaration order, following Go's register ABI (regabi);
 - strings expand to `.data` (read as `c64`) and `.len`;
@@ -88,8 +88,8 @@ toggled independently via `--auto-fargs` and `--auto-frets`:
 - return values map to registers in return order (`ret0`, `ret1`, ...).
 
 Explicit `--fargs` / `--frets` rules always take precedence and are never
-overwritten. Disable automatic derivation with `--auto-fargs=false` and/or
-`--auto-frets=false`.
+overwritten. Disable automatic derivation with `--fargs-auto=false` and/or
+`--frets-auto=false`.
 
 # Installation
 
