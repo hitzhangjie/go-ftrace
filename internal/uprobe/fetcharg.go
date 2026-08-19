@@ -30,11 +30,11 @@ type ArgRule struct {
 	Dereference bool
 }
 
-func parseFetchArgs(funcParams map[string]map[string]string) (fetchArgs map[string][]*FetchArg, err error) {
+func parseFetchArgs(funcParams map[string][]FetchArgExpr) (fetchArgs map[string][]*FetchArg, err error) {
 	fetchArgs = map[string][]*FetchArg{}
-	for fname, params := range funcParams {
-		for name, expr := range params {
-			fa, err := newFetchArg(name, expr)
+	for fname, exprs := range funcParams {
+		for _, e := range exprs {
+			fa, err := newFetchArg(e.Varname, e.Expr)
 			if err != nil {
 				return nil, err
 			}

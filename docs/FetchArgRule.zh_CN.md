@@ -1,5 +1,8 @@
 # 获取参数的规则
 
+> 另见 [FetchArgExamples.zh_CN.md](./FetchArgExamples.zh_CN.md)，其中汇总了常见
+> Go 参数 / 返回值约定下可直接使用的 `--fargs` / `--frets` 规则。
+
 ## 概述
 
 这些获取参数的规则借鉴了一些支持引用和解引用、指针运算的编程语言的概念。

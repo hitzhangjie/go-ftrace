@@ -40,11 +40,25 @@ Check `examples/trace_funcs_arguments`, try following tracing tests:
   ```
   example: trace a specific method of specific type, and fetch its receiver argument:
     ftrace -u 'main.(*Student).String' ./main \
-      'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+      --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
   
   example: trace a specific method of specific type, and fetch its arguments list:
     ftrace -u 'main.(*Student).BuyBook' ./main \
-      'main.(*Student).BuyBook(s.book=(+0(%bx)):c128, s.book.len=(%cx):s64, s.num=(%di):s64)'
+      --fargs 'main.(*Student).BuyBook(s.book=(+0(%bx)):c128, s.book.len=(%cx):s64, s.num=(%di):s64)'
+  ```
+
+## Trace return values
+
+Use `--frets` to fetch return values at the function's RET point:
+
+  ```
+  example: fetch a function's return value:
+    ftrace -u 'main.add' ./main \
+      --frets 'main.add(result=(%ax):s64)'
+
+  example: fetch fields of a returned pointer:
+    ftrace -u 'main.(*serviceMesh).send' ./main \
+      --frets 'main.(*serviceMesh).send(Code=(+0(%ax)):s64, Detail.itab=(+8(%ax)):u64, Detail.data=(+16(%ax)):u64)'
   ```
 
 >ps: `Makefile` is provided, you can run `make <target>` to quickly test it.
@@ -53,30 +67,30 @@ Check `examples/trace_funcs_arguments`, try following tracing tests:
 
 # Installation
 
-## Method 1
+## As root
 
-install into your $GOBIN or $GOPATH/bin, please add $GOBIN, $GOPATH/bin to your PATH
+The simplest way is to install and run it directly:
 
 ```bash
 go install github.com/hitzhangjie/go-ftrace/cmd/ftrace@latest
+# or, from a source checkout
+make install
 ```
 
-bpf tool require special permission, so we need run ftrace as root, like `sudo ftrace ...`,
-and we must make sure ftrace is searchable by sudo, so link it to the searchpath by `sudo`
+## As a non-root user
+
+To run `ftrace` without `sudo`, use `make install`, which performs the
+privilege setup (symlink, ownership, setuid) required for regular users:
 
 ```bash
-sudo ln -s ~/go/bin/ftrace /usr/sbin/
+make install
 ```
 
-then we can run it with sudo:
+Alternatively, apply those settings manually as described in
+[INSTALLATION.md](./INSTALLATION.md).
 
-```bash
-sudo ftrace -u 'go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire' ./a.out
-```
-
-## Method 2
-
-Also, `Makefile` is provided, run `make && make install` is enough.
+> See [INSTALLATION.md](./INSTALLATION.md) for details and the rationale behind
+> the privilege-related setup.
 
 # Use cases
 
@@ -108,13 +122,13 @@ if we want to observing the details of `doSomething`, we can trace like ths:
 
 ```bash
 sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main \
-  'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+  --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
 ```
 
 ftrace will output the details:
 
 ```bash
-$ sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+$ sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
 WARN[0000] skip main.main, failed to get ret offsets: no ret offsets 
 found 14 uprobes, large number of uprobes (>1000) need long time for attaching and detaching, continue? [Y/n]
 

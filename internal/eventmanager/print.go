@@ -26,7 +26,7 @@ func (m *EventManager) PrintStack(goid uint64) (err error) {
 		}
 
 		switch event.Location {
-		case 0: // entpoint
+		case eventLocationEntry:
 			startTimeStack = append(startTimeStack, event.TimeNs)
 			callChain, err := m.SprintCallChain(event)
 			if err != nil {
@@ -49,7 +49,7 @@ func (m *EventManager) PrintStack(goid uint64) (err error) {
 				color.CyanString(lineInfo))
 			indent += "  "
 
-		case 1: // retpoint
+		case eventLocationRet:
 			if len(indent) == 0 {
 				continue
 			}
@@ -62,12 +62,18 @@ func (m *EventManager) PrintStack(goid uint64) (err error) {
 			elapsed := event.TimeNs - startTimeStack[len(startTimeStack)-1]
 			startTimeStack = startTimeStack[:len(startTimeStack)-1]
 			indent = indent[:len(indent)-2]
-			fmt.Printf("%s %08.4f %s } %s+%d %s\n",
+
+			retval := ""
+			if event.argString != "" {
+				retval = " => " + color.MagentaString(event.argString)
+			}
+			fmt.Printf("%s %08.4f %s } %s+%d%s %s\n",
 				color.YellowString(t),
 				time.Duration(elapsed).Seconds(),
 				indent,
 				color.RedString(syms[0].Name),
 				offset,
+				retval,
 				color.CyanString(lineInfo))
 		}
 	}

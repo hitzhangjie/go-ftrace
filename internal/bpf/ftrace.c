@@ -320,6 +320,12 @@ int ret(struct pt_regs *ctx)
 	e->ip = ctx->ip;
 	e->time_ns = bpf_ktime_get_ns();
 
+	if (!CONFIG.fetch_args)
+		goto cont;
+
+	fetch_args(ctx, e->goid, e->ip);
+
+cont:
 	return bpf_map_push_elem(&event_queue, e, BPF_EXIST);
 }
 

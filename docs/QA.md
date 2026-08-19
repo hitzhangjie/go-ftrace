@@ -13,7 +13,3 @@ No, Linux eBPF verifier verifies the ebpf programme, it doesn't allow heavy logi
 Polling events and printing the callstack is done in the usermode part. This part runs concurrently with your logic. While uprobes will trigger exception and context-switched to kernel mode to execute the callback.
 
 ps: both kprobe callback and uprobe callback run in kernel mode.
-
-
-### others
-

@@ -30,7 +30,11 @@ go-ftrace 是一个基于Linux bpf(2) 的类似内核工具 ftrace(1) 的函数�
 
   示例6: 跟踪一个自定义类型的方法，并试图提取关心的参数:
     ftrace -u 'main.(*Student).String' ./main \
-      'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+      --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+
+  示例7: 在函数返回点提取返回值:
+    ftrace -u 'main.(*serviceMesh).send' ./main \
+      --frets 'main.(*serviceMesh).send(Code=(+0(%ax)):s64, Detail.itab=(+8(%ax)):u64, Detail.data=(+16(%ax)):u64)'
   ```
 
 示例目录下同时提供了一个 `examples/Makefile`, 你也可以执行 `make <target>` 来快速执行对应的命令（对应上面示例）来进行测试.
@@ -39,33 +43,28 @@ ps: 你可以在启动被测试程序 ./main 之前或者之后启动 ftrace，�
 
 # 安装方法
 
-## 方式1
+## root 用户
 
-首先编译安装到 $GOBIN 或者 $GOPATH/bin，注意将 $GOBIN，$GOPATH/bin 设置到程序搜索路径 PATH 中。
+最简单的方式是直接安装并运行：
 
 ```bash
 go install github.com/hitzhangjie/go-ftrace/cmd/ftrace@latest
+# 或者，在源码目录下
+make install
 ```
 
-bpf tool require special permission, so we need run ftrace as root, like `sudo ftrace ...`,
-and we must make sure ftrace is searchable by sudo, so link it to the searchpath by `sudo`
+## 非 root 用户
 
-bpf程序的加载、执行需要特殊的权限，为了方便测试，我们先使用 `sudo` 来执行 `sudo ftrace ...`，由于 `sudo` 对安全性有要求，
-为了执行 `sudo ftrace` 时能正常搜索到 `ftrace`，现在还需要添加个软链到 `/usr/sbin/`。
+如果希望非 root 用户（无需 sudo）也能运行，请使用 `make install`，它会完成普通用户
+运行所需的提权设置（软链、属主、setuid）：
 
 ```bash
-sudo ln -s ~/go/bin/ftrace /usr/sbin/
+make install
 ```
 
-经过这些设置后，就可以通过 `sudo ftrace ...` 对程序进行跟踪了:
+也可以手动执行 Makefile 里的相关设置，详见 [INSTALLATION.md](./INSTALLATION.md)。
 
-```bash
-sudo ftrace -u 'go.etcd.io/etcd/client/v3/concurrency.(*Mutex).tryAcquire' ./a.out
-```
-
-## 方式2
-
-为了简化安装，项目根目录下也提供了一个 `Makefile` 文件，可以执行 `make && make install` 来完成安装。
+> 安装细节与背后的考虑请参考 [INSTALLATION.md](./INSTALLATION.md)。
 
 # 使用案例
 
@@ -97,7 +96,7 @@ func doSomething() {
 
 ```bash
 sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main \
-  'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+  --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
 ```
 
 `ftrace` 将输出如下信息，从中可以看到：
@@ -110,7 +109,7 @@ sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main \
 - 想获取的函数参数信息
 
 ```bash
-$ sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+$ sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
 WARN[0000] skip main.main, failed to get ret offsets: no ret offsets 
 found 14 uprobes, large number of uprobes (>1000) need long time for attaching and detaching, continue? [Y/n]
 

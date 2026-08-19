@@ -42,14 +42,18 @@ here're some tracing examples:
   example: trace a specific method of specific type:
     ftrace -u 'main.(*Student).String ./main    
 
-  example: trace a specific method of specific type, and fetch its arguemnts:
+  example: trace a specific method of specific type, and fetch its arguments:
     ftrace -u 'main.(*Student).String' ./main \
-      'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+      --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+
+  example: fetch the return value of a function at its RET point:
+    ftrace -u 'main.(*serviceMesh).send' ./main \
+      --frets 'main.(*serviceMesh).send(Code=(+0(%ax)):s64, Detail.itab=(+8(%ax)):u64, Detail.data=(+16(%ax)):u64)'
  `
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "ftrace [-u wildcards|-x|-d] <binary> [fetch]",
+	Use:   "ftrace [-u wildcards|-x|-d] <binary> [--fargs ...] [--frets ...]",
 	Short: usage,
 	Long:  usageLong,
 	PreRunE: func(cmd *cobra.Command, args []string) error {
@@ -65,16 +69,22 @@ var rootCmd = &cobra.Command{
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		bin := args[0]
-		fetch := args[1:]
 		excludeVendor, _ := cmd.Flags().GetBool("exclude-vendor")
 		uprobeWildcards, _ := cmd.Flags().GetStringSlice("uprobe-wildcards")
 		drilldown, _ := cmd.Flags().GetString("drilldown")
 		trimprefix, _ := cmd.Flags().GetString("trimprefix")
+		fargs, _ := cmd.Flags().GetStringArray("fargs")
+		frets, _ := cmd.Flags().GetStringArray("frets")
+
+		// positional fetch rules are kept for backward compatibility and are
+		// treated as entry argument fetch rules
+		fargs = append(fargs, args[1:]...)
 
 		cfg := &Config{
 			excludeVendor:   excludeVendor,
 			uprobeWildcards: uprobeWildcards,
-			fetch:           fetch,
+			fargs:           fargs,
+			frets:           frets,
 			drilldown:       drilldown,
 			trimprefix:      trimprefix,
 		}
@@ -117,6 +127,8 @@ func init() {
 	rootCmd.Flags().BoolP("exclude-vendor", "x", true, "exclude vendor")
 	rootCmd.Flags().StringP("drilldown", "D", "", "drill down analysis")
 	rootCmd.Flags().StringP("trimprefix", "P", "", "trim filepath prefix")
+	rootCmd.Flags().StringArrayP("fargs", "f", nil, "fetch arguments at function entry, e.g. 'main.(*T).M(a=(*+0(%ax)):s64)'")
+	rootCmd.Flags().StringArrayP("frets", "r", nil, "fetch return values at function return, e.g. 'main.(*T).M(err=(*+0(%ax)):s64)'")
 
 	rootCmd.MarkFlagRequired("uprobe-wildcards")
 }

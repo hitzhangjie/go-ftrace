@@ -1,5 +1,9 @@
 # Rules to Fetch Arguments
 
+> See also [FetchArgExamples.md](./FetchArgExamples.md) for ready-to-use
+> `--fargs` / `--frets` rules covering common Go argument and return-value
+> conventions.
+
 ## Overview
 
 This fetching arguments rules borrowing some concepts of programming 

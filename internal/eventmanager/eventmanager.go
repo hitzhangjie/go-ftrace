@@ -12,6 +12,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// event.Location values, aligned with internal/bpf/ftrace.c (ENTPOINT/RETPOINT).
+const (
+	eventLocationEntry uint8 = 0 // function entry
+	eventLocationRet   uint8 = 1 // function return
+)
+
 // Event represents a func enter/ret event, see ftrace.c event
 type Event struct {
 	bpf.GoftraceEvent

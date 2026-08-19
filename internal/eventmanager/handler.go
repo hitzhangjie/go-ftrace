@@ -39,14 +39,19 @@ func (m *EventManager) Handle(event bpf.GoftraceEvent) error {
 }
 
 func (m *EventManager) Add(event bpf.GoftraceEvent) {
-	length := len(m.goEvents[event.Goid])
-	if length == 0 && event.Location != 0 {
-		return
-	}
-	// get the associated uprobe
+	// get the associated uprobe first, since we need to know how many args
+	// should be consumed from the per-goroutine arg channel
 	uprobe, err := m.GetUprobe(event)
 	if err != nil {
 		log.Errorf("failed to get uprobe for event %+v: %+v", event, err)
+		return
+	}
+
+	length := len(m.goEvents[event.Goid])
+	if length == 0 && event.Location != eventLocationEntry {
+		// orphaned ret event (no matching entry recorded), drop it but still
+		// consume its args to keep the arg stream aligned
+		m.consumeArgs(event.Goid, len(uprobe.FetchArgs))
 		return
 	}
 	if length > 0 {
@@ -55,22 +60,14 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) {
 			// duplicated entry event due to stack expansion/shrinkage
 			log.Debugf("duplicated entry event: %+v", event)
 			m.goEvents[event.Goid][length-1].GoftraceEvent = event
-			for range uprobe.FetchArgs {
-				for m.goArgs[event.Goid] == nil {
-					time.Sleep(time.Millisecond)
-				}
-				<-m.goArgs[event.Goid]
-			}
+			m.consumeArgs(event.Goid, len(uprobe.FetchArgs))
 			return
 		}
 	}
 	// we need to fetch `len(uprobe.FetchArgs)` args
 	args := []string{}
 	for _, fetchArg := range uprobe.FetchArgs {
-		for m.goArgs[event.Goid] == nil {
-			time.Sleep(time.Millisecond)
-		}
-		arg := <-m.goArgs[event.Goid]
+		arg := m.nextArg(event.Goid)
 		if len(args) > 0 {
 			args = append(args, ", ")
 		}
@@ -84,10 +81,25 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) {
 		argString:     strings.Join(args, ""),
 	})
 	switch event.Location {
-	case 0: // entry
+	case eventLocationEntry:
 		m.goEventStack[event.Goid]++
-	case 1: // ret
+	case eventLocationRet:
 		m.goEventStack[event.Goid]--
+	}
+}
+
+// nextArg reads the next argument of the given goroutine from its arg channel.
+func (m *EventManager) nextArg(goid uint64) bpf.GoftraceArgData {
+	for m.goArgs[goid] == nil {
+		time.Sleep(time.Millisecond)
+	}
+	return <-m.goArgs[goid]
+}
+
+// consumeArgs drops `n` arguments of the given goroutine from its arg channel.
+func (m *EventManager) consumeArgs(goid uint64, n int) {
+	for i := 0; i < n; i++ {
+		m.nextArg(goid)
 	}
 }
 

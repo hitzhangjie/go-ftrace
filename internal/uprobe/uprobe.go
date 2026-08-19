@@ -10,7 +10,7 @@ const (
 
 type Uprobe struct {
 	Funcname  string
-	Address   uint64         // absolute address of the function entry
+	Address   uint64         // absolute virtual address of the probe point (function entry or RET instruction)
 	AbsOffset uint64         // absolute offset to the binary entry (ELF file beginning)
 	RelOffset uint64         // relative to the function entry
 	Location  UprobeLocation // location of the probe

@@ -11,11 +11,19 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// FetchArgExpr is a single variable fetch expression, kept in the order the
+// user declared it, so the printed argument order matches the rule order.
+type FetchArgExpr struct {
+	Varname string
+	Expr    string
+}
+
 type ParseOptions struct {
-	ExcludeVendor   bool
-	UprobeWildcards []string
-	FuncNames       []string
-	FetchFuncArgs   map[string]map[string]string // funcname: varname: expression
+	ExcludeVendor    bool
+	UprobeWildcards  []string
+	FuncNames        []string
+	FetchFuncArgs    map[string][]FetchArgExpr // funcname: ordered var exprs (entry args)
+	RetFetchFuncArgs map[string][]FetchArgExpr // funcname: ordered var exprs (return values)
 }
 
 // Parse parses the wanted function names (and its parameters), and parse DWARF info, ELF info
@@ -23,6 +31,10 @@ type ParseOptions struct {
 // then build the uprobes that will be attached.
 func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
 	fetchArgs, err := parseFetchArgs(opts.FetchFuncArgs)
+	if err != nil {
+		return
+	}
+	retFetchArgs, err := parseFetchArgs(opts.RetFetchFuncArgs)
 	if err != nil {
 		return
 	}
@@ -122,8 +134,12 @@ func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
 			uprobes = append(uprobes, Uprobe{
 				Funcname:  funcname,
 				Location:  AtRet,
+				// the absolute virtual address of the RET instruction, used as
+				// the key of arg_rules_map when fetching return values
+				Address:   sym.Value + (retOffset - entOffset),
 				AbsOffset: retOffset,
 				RelOffset: retOffset - entOffset,
+				FetchArgs: retFetchArgs[funcname],
 			})
 		}
 		fmt.Fprintf(message, "]")
