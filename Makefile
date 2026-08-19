@@ -5,11 +5,13 @@
 #    avoid copying the binary to /usr/sbin again and again, which
 #    is searchable by `sudo`, so we use `ln -sf` to create a symbolic
 #    link to ~/go/bin/ftrace instead.
+GO ?= go1.22.2
+
 all:
-	cd cmd/ftrace && go build -v
+	cd cmd/ftrace && $(GO) build -v
 
 install:
-	cd cmd/ftrace && go install -v
+	cd cmd/ftrace && $(GO) install -v
 	sudo ln -sf ~/go/bin/ftrace /usr/sbin
 	sudo chown root:root ~/go/bin/ftrace
 	sudo chmod u+s /usr/sbin/ftrace
