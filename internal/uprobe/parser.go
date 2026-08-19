@@ -24,6 +24,10 @@ type ParseOptions struct {
 	FuncNames        []string
 	FetchFuncArgs    map[string][]FetchArgExpr // funcname: ordered var exprs (entry args)
 	RetFetchFuncArgs map[string][]FetchArgExpr // funcname: ordered var exprs (return values)
+
+	// AutoFetch enables automatic derivation of fetch rules from DWARF debug
+	// info for functions that do not have explicit --fargs/--frets rules.
+	AutoFetch bool
 }
 
 // Parse parses the wanted function names (and its parameters), and parse DWARF info, ELF info
@@ -74,6 +78,12 @@ func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
 			}
 			break
 		}
+	}
+
+	// Fill in automatically derived fetch rules for functions that do not
+	// have explicit --fargs/--frets rules.
+	if opts.AutoFetch {
+		fillAutoFetch(elf, attachFuncs, fetchArgs, retFetchArgs)
 	}
 
 	sym, err := elf.ResolveSymbol("runtime.goexit1")

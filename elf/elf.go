@@ -64,9 +64,21 @@ func New(bin string) (_ *ELF, err error) {
 	}
 	dwarfData, err := dwarf.New(abbrev, aranges, frame, info, line, pubnames, ranges, str)
 	if err != nil {
-		println("...")
 		return
 	}
+
+	// DWARF5 introduced several additional sections that the legacy
+	// dwarf.New constructor does not accept. Register them so that DWARF5
+	// debug info (produced by recent Go toolchains) can be decoded.
+	//
+	// GetDebugSectionElf expects the bare suffix (it prepends ".debug_"),
+	// while Data.AddSection expects the full ".debug_<suffix>" name.
+	for _, suffix := range []string{"addr", "line_str", "str_offsets", "rnglists", "loclists", "sup", "macro", "names", "types"} {
+		if data, err := godwarf.GetDebugSectionElf(elfFile, suffix); err == nil {
+			_ = dwarfData.AddSection(".debug_"+suffix, data)
+		}
+	}
+
 	return &ELF{
 		bin:       bin,
 		binFile:   binFile,

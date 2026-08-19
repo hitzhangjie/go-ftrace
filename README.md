@@ -65,6 +65,30 @@ Use `--frets` to fetch return values at the function's RET point:
 >
 > And tracing by ftrace can be done either before or after launching ./main, both approaches will work.
 
+## Automatic argument / return-value fetching
+
+The examples above show how to fetch arguments (`--fargs`) and return values
+(`--frets`) by writing expressions manually. For common Go types (integers,
+pointers, strings, slices, interfaces, and pointers to structs), ftrace can
+now derive those rules automatically from DWARF debug info:
+
+```bash
+# no --fargs / --frets needed: ftrace derives them automatically
+sudo ftrace -u 'main.(*Student).String' ./main
+```
+
+Automatic fetching is on by default (equivalent to `--auto-fetch`):
+
+- arguments map to registers `ax, bx, cx, di, si, r8, ...` in declaration order, following Go's register ABI (regabi);
+- strings expand to `.data` (read as `c64`) and `.len`;
+- slices expand to `.data / .len / .cap`;
+- interfaces expand to `.itab / .data`;
+- pointers to structs are dereferenced and their fields flattened;
+- return values map to registers in return order (`ret0`, `ret1`, ...).
+
+Explicit `--fargs` / `--frets` rules always take precedence and are never
+overwritten. Pass `--auto-fetch=false` to disable automatic derivation.
+
 # Installation
 
 ## As root
