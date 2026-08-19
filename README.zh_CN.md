@@ -52,7 +52,7 @@ ftrace 现在可以从 DWARF 调试信息中自动推导出对应的提取规则
 sudo ftrace -u 'main.(*Student).String' ./main
 ```
 
-自动推导默认开启（等价于 `--auto-fetch`），其规则如下：
+自动推导默认开启，且入参与返回值可分别独立控制（`--auto-fargs` 与 `--auto-frets`），其规则如下：
 
 - 依据 Go 的寄存器 ABI（regabi），将函数入参按声明顺序映射到 `ax, bx, cx, di, si, r8...` 等寄存器；
 - 字符串展开为 `.data`（以 c64 读取字符串内容）与 `.len`；
@@ -62,7 +62,7 @@ sudo ftrace -u 'main.(*Student).String' ./main
 - 返回值同样按返回顺序映射到寄存器（`~r0/ret0`、`~r1/ret1` …）。
 
 如果某个函数已经显式给出了 `--fargs` / `--frets`，则显式规则优先，不会被覆盖；
-如需完全关闭自动推导，可传入 `--auto-fetch=false`。
+如需关闭自动推导，可分别传入 `--auto-fargs=false` 或 `--auto-frets=false`。
 
 # 安装方法
 

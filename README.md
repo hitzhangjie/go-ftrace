@@ -77,7 +77,8 @@ now derive those rules automatically from DWARF debug info:
 sudo ftrace -u 'main.(*Student).String' ./main
 ```
 
-Automatic fetching is on by default (equivalent to `--auto-fetch`):
+Automatic fetching is on by default, and arguments and return values can be
+toggled independently via `--auto-fargs` and `--auto-frets`:
 
 - arguments map to registers `ax, bx, cx, di, si, r8, ...` in declaration order, following Go's register ABI (regabi);
 - strings expand to `.data` (read as `c64`) and `.len`;
@@ -87,7 +88,8 @@ Automatic fetching is on by default (equivalent to `--auto-fetch`):
 - return values map to registers in return order (`ret0`, `ret1`, ...).
 
 Explicit `--fargs` / `--frets` rules always take precedence and are never
-overwritten. Pass `--auto-fetch=false` to disable automatic derivation.
+overwritten. Disable automatic derivation with `--auto-fargs=false` and/or
+`--auto-frets=false`.
 
 # Installation
 

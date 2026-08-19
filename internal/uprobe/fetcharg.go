@@ -14,6 +14,13 @@ type FetchArg struct {
 	Type      string
 	Size      int
 	Rules     []*ArgRule
+
+	// NilCheck marks a value whose base register holds a possibly-nil pointer
+	// (used for struct-pointer arguments/return values). When the fetched data
+	// reports nil, the flattened leaf fields are collapsed into a single
+	// "NilRoot = nil" instead of dereferencing address 0.
+	NilCheck bool
+	NilRoot  string
 }
 
 type ArgLocation int
@@ -22,6 +29,14 @@ const (
 	Register ArgLocation = iota
 	Stack
 )
+
+// MaxFetchArgs is the maximum number of fetch args per probe, imposed by the
+// BPF arg_rules map (struct arg_rules.rules[8]).
+const MaxFetchArgs = 8
+
+// MaxFetchArgRules is the maximum number of rules per fetch arg, imposed by
+// the BPF arg_rule struct (offsets[8]/dereference[8]).
+const MaxFetchArgRules = 8
 
 type ArgRule struct {
 	From        ArgLocation

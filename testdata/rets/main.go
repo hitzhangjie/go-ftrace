@@ -112,6 +112,9 @@ func divmod(a, b int) (int, int) { return a / b, a % b }
 //
 //go:noinline
 func send(ok bool) *MeshError {
+	defer func() {
+		_ = ok
+	}()
 	if !ok {
 		return &MeshError{Code: 500, Detail: errors.New("send failed")}
 	}

@@ -66,8 +66,24 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) {
 	}
 	// we need to fetch `len(uprobe.FetchArgs)` args
 	args := []string{}
+	printedNil := map[string]bool{}
 	for _, fetchArg := range uprobe.FetchArgs {
 		arg := m.nextArg(event.Goid)
+		// A nil-checked leaf belongs to a possibly-nil pointer (e.g. a struct
+		// pointer return value). When the pointer is nil, collapse the whole
+		// group of flattened fields into a single "root = nil" instead of
+		// printing each dereferenced field as garbage/zero.
+		if fetchArg.NilCheck && arg.IsNil != 0 {
+			if printedNil[fetchArg.NilRoot] {
+				continue
+			}
+			printedNil[fetchArg.NilRoot] = true
+			if len(args) > 0 {
+				args = append(args, ", ")
+			}
+			args = append(args, fetchArg.NilRoot, "=", "nil")
+			continue
+		}
 		if len(args) > 0 {
 			args = append(args, ", ")
 		}
@@ -90,10 +106,14 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) {
 
 // nextArg reads the next argument of the given goroutine from its arg channel.
 func (m *EventManager) nextArg(goid uint64) bpf.GoftraceArgData {
-	for m.goArgs[goid] == nil {
-		time.Sleep(time.Millisecond)
+	var ch chan bpf.GoftraceArgData
+	for ch == nil {
+		ch = m.argChan(goid)
+		if ch == nil {
+			time.Sleep(time.Millisecond)
+		}
 	}
-	return <-m.goArgs[goid]
+	return <-ch
 }
 
 // consumeArgs drops `n` arguments of the given goroutine from its arg channel.

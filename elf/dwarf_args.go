@@ -34,6 +34,7 @@ func (e *ELF) FunctionVariables(funcname string) (args, rets []*Variable, err er
 		return nil, nil, fmt.Errorf("%s: %s", DIENotFoundError, funcname)
 	}
 
+	seenRets := make(map[string]struct{})
 	for _, child := range e.dieChildren(die) {
 		if child.Tag != dwarf.TagFormalParameter {
 			continue
@@ -54,6 +55,15 @@ func (e *ELF) FunctionVariables(funcname string) (args, rets []*Variable, err er
 		isRet := varp || strings.HasPrefix(name, "~r")
 		v := &Variable{Name: name, IsRet: isRet, Type: typ}
 		if isRet {
+			// The Go compiler may emit duplicate return-value DIEs for a
+			// function that uses defer (e.g. two identical ~r0 entries). They
+			// refer to the same logical return value, so keep only the first;
+			// otherwise the caller would fetch the same value twice and, when
+			// flattening via the register ABI, read a bogus second register.
+			if _, dup := seenRets[name]; dup {
+				continue
+			}
+			seenRets[name] = struct{}{}
 			rets = append(rets, v)
 		} else {
 			args = append(args, v)
@@ -87,7 +97,13 @@ func (e *ELF) dieChildren(die *dwarf.Entry) []*dwarf.Entry {
 			depth--
 			continue
 		}
-		out = append(out, c)
+		// Only collect direct children. Descendants (e.g. variables declared
+		// inside lexical blocks, or the formal parameters of inlined
+		// subroutines) must not be mistaken for this function's own
+		// parameters/return values.
+		if depth == 0 {
+			out = append(out, c)
+		}
 		if c.Children {
 			depth++
 		}

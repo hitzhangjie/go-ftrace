@@ -3,6 +3,7 @@ package eventmanager
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/elastic/go-sysinfo"
@@ -36,7 +37,11 @@ type EventManager struct {
 
 	goEvents     map[uint64][]Event // k=goid,v=[]event
 	goEventStack map[uint64]uint64
-	goArgs       map[uint64]chan bpf.GoftraceArgData
+
+	// argMu guards goArgs, which is written by the arg-dispatch goroutine
+	// (handleArg) and read by the event-handling goroutine (nextArg).
+	argMu  sync.RWMutex
+	goArgs map[uint64]chan bpf.GoftraceArgData
 
 	bootTime time.Time
 }
@@ -70,12 +75,39 @@ func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GoftraceArgData, d
 // dispatches events belonging to the same goroutine to the same channel key'd by goid
 func (m *EventManager) handleArg() {
 	for arg := range m.argCh {
-		if _, ok := m.goArgs[arg.Goid]; !ok {
-			m.goArgs[arg.Goid] = make(chan bpf.GoftraceArgData, 1000)
-		}
+		ch := m.ensureArgChan(arg.Goid)
 		log.Debugf("add arg %+v", arg)
-		m.goArgs[arg.Goid] <- arg
+		ch <- arg
 	}
+}
+
+// ensureArgChan returns the per-goroutine arg channel, creating it lazily if
+// it does not yet exist.
+func (m *EventManager) ensureArgChan(goid uint64) chan bpf.GoftraceArgData {
+	m.argMu.RLock()
+	ch := m.goArgs[goid]
+	m.argMu.RUnlock()
+	if ch != nil {
+		return ch
+	}
+
+	m.argMu.Lock()
+	defer m.argMu.Unlock()
+	// double-checked locking: another goroutine may have created it between
+	// the RUnlock above and the Lock here.
+	if ch = m.goArgs[goid]; ch == nil {
+		ch = make(chan bpf.GoftraceArgData, 1000)
+		m.goArgs[goid] = ch
+	}
+	return ch
+}
+
+// argChan returns the per-goroutine arg channel, or nil if it has not been
+// created yet.
+func (m *EventManager) argChan(goid uint64) chan bpf.GoftraceArgData {
+	m.argMu.RLock()
+	defer m.argMu.RUnlock()
+	return m.goArgs[goid]
 }
 
 // GetUprobe returns the uprobe of the given event

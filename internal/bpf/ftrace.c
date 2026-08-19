@@ -58,6 +58,10 @@ struct arg_rule
 	__u8 length;
 	__s16 offsets[8];
 	__u8 dereference[8];
+	// when set, the base register holds a pointer that may be nil; if the
+	// pointer is 0 the fetched value is reported as nil instead of being
+	// dereferenced (used for struct-pointer arguments/return values).
+	__u8 nil_check;
 };
 
 // fetch 1 arg needs several rules (at most 8 rules)
@@ -73,6 +77,9 @@ struct arg_data
 {
 	__u64 goid;
 	__u8 data[MAX_DATA_SIZE];
+	// set to 1 when the arg could not be dereferenced because its base
+	// pointer was nil; the data payload is left zeroed in that case.
+	__u8 is_nil;
 };
 
 const struct arg_data *___ __attribute__((unused));
@@ -208,6 +215,16 @@ static __always_inline void fetch_args_from_memory(struct pt_regs *ctx, struct a
 	__u64 addr = 0;
 	read_reg(ctx, rule->reg, &addr);
 
+	// when the base register holds a possibly-nil pointer and it is actually
+	// nil, do not dereference (which would read from address 0); instead mark
+	// the value as nil and leave the payload zeroed.
+	if (rule->nil_check && addr == 0)
+	{
+		data->is_nil = 1;
+		bpf_map_push_elem(&arg_queue, data, BPF_EXIST);
+		return;
+	}
+
 	// then do other addressing rules
 	for (int i = 0; i < 8 && i < rule->length; i++)
 	{
@@ -251,6 +268,8 @@ static __always_inline void fetch_args(struct pt_regs *ctx, __u64 goid, __u64 ip
 
 	for (int i = 0; i < 8 && i < rules->length; i++)
 	{
+		// data is reused across rules; reset the nil marker before each fetch.
+		data->is_nil = 0;
 		switch (rules->rules[i].type)
 		{
 		case 0:

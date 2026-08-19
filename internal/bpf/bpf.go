@@ -111,19 +111,22 @@ func (b *BPF) Load(uprobes []uprobe.Uprobe, opts LoadOptions) (err error) {
 }
 
 func (b *BPF) setArgRules(pc uint64, fetchArgs []*uprobe.FetchArg) (err error) {
-	if len(fetchArgs) > 8 {
-		return fmt.Errorf("too many fetch args: %d > 8", len(fetchArgs))
+	if len(fetchArgs) > uprobe.MaxFetchArgs {
+		return fmt.Errorf("too many fetch args: %d > %d", len(fetchArgs), uprobe.MaxFetchArgs)
 	}
 	argRules := GoftraceArgRules{Length: uint8(len(fetchArgs))}
 	for idx, fetchArg := range fetchArgs {
-		if len(fetchArg.Rules) > 8 {
-			return fmt.Errorf("too many rules: %d > 8", len(fetchArg.Rules))
+		if len(fetchArg.Rules) > uprobe.MaxFetchArgRules {
+			return fmt.Errorf("too many rules: %d > %d", len(fetchArg.Rules), uprobe.MaxFetchArgRules)
 		}
 		rule := GoftraceArgRule{
 			Type:   uint8(fetchArg.Rules[len(fetchArg.Rules)-1].From),
 			Reg:    RegisterConstants[fetchArg.Rules[0].Register],
 			Size:   uint8(fetchArg.Size),
 			Length: uint8(len(fetchArg.Rules) - 1),
+		}
+		if fetchArg.NilCheck {
+			rule.NilCheck = 1
 		}
 
 		j := 0

@@ -75,7 +75,8 @@ var rootCmd = &cobra.Command{
 		trimprefix, _ := cmd.Flags().GetString("trimprefix")
 		fargs, _ := cmd.Flags().GetStringArray("fargs")
 		frets, _ := cmd.Flags().GetStringArray("frets")
-		autoFetch, _ := cmd.Flags().GetBool("auto-fetch")
+		autoFetchArgs, _ := cmd.Flags().GetBool("auto-fargs")
+		autoFetchRets, _ := cmd.Flags().GetBool("auto-frets")
 
 		// positional fetch rules are kept for backward compatibility and are
 		// treated as entry argument fetch rules
@@ -88,7 +89,8 @@ var rootCmd = &cobra.Command{
 			frets:           frets,
 			drilldown:       drilldown,
 			trimprefix:      trimprefix,
-			autoFetch:       autoFetch,
+			autoFetchArgs:   autoFetchArgs,
+			autoFetchRets:   autoFetchRets,
 		}
 		tracer, err := NewTracer(bin, cfg)
 		if err != nil {
@@ -131,7 +133,8 @@ func init() {
 	rootCmd.Flags().StringP("trimprefix", "P", "", "trim filepath prefix")
 	rootCmd.Flags().StringArrayP("fargs", "f", nil, "fetch arguments at function entry, e.g. 'main.(*T).M(a=(*+0(%ax)):s64)'")
 	rootCmd.Flags().StringArrayP("frets", "r", nil, "fetch return values at function return, e.g. 'main.(*T).M(err=(*+0(%ax)):s64)'")
-	rootCmd.Flags().BoolP("auto-fetch", "a", true, "automatically derive fetch rules for args/return values from DWARF when no explicit --fargs/--frets rule is given")
+	rootCmd.Flags().BoolP("auto-fargs", "A", true, "automatically derive entry-argument fetch rules from DWARF when no explicit --fargs rule is given")
+	rootCmd.Flags().BoolP("auto-frets", "R", true, "automatically derive return-value fetch rules from DWARF when no explicit --frets rule is given")
 
 	rootCmd.MarkFlagRequired("uprobe-wildcards")
 }

@@ -9,10 +9,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// maxAutoFetchArgs is the hard limit imposed by the BPF arg_rules map (it
-// holds at most 8 arg_rule entries per uprobe).
-const maxAutoFetchArgs = 8
-
 // abiRegs is the Go ABI (regabi) assignment order for integer/pointer
 // arguments and return values on amd64.
 var abiRegs = []string{"ax", "bx", "cx", "di", "si", "r8", "r9", "r10", "r11"}
@@ -30,6 +26,13 @@ type argSpec struct {
 	mem    bool
 	offset int64
 	deref  bool
+
+	// nilCheck marks a value whose base register holds a possibly-nil
+	// pointer. When set, nilRoot names the whole pointer (e.g. "ret0") so the
+	// flattened leaf fields can be collapsed back into a single "nil" when the
+	// pointer is nil.
+	nilCheck bool
+	nilRoot  string
 }
 
 func (s argSpec) fetchArg() *FetchArg {
@@ -38,19 +41,27 @@ func (s argSpec) fetchArg() *FetchArg {
 		rules = append(rules, &ArgRule{From: Stack, Offset: s.offset, Dereference: s.deref})
 	}
 	return &FetchArg{
-		Varname: s.name,
-		Type:    s.typ,
-		Size:    s.size,
-		Rules:   rules,
+		Varname:  s.name,
+		Type:     s.typ,
+		Size:     s.size,
+		Rules:    rules,
+		NilCheck: s.nilCheck,
+		NilRoot:  s.nilRoot,
 	}
 }
 
 // fillAutoFetch derives fetch rules for every traced function that does not
 // already have explicit rules. Explicit rules always win.
-func fillAutoFetch(e *elf.ELF, funcnames []string, fetchArgs, retFetchArgs map[string][]*FetchArg) {
+//
+// autoArgs / autoRets independently control whether entry arguments and return
+// values are derived, respectively.
+func fillAutoFetch(e *elf.ELF, funcnames []string, fetchArgs, retFetchArgs map[string][]*FetchArg, autoArgs, autoRets bool) {
+	if !autoArgs && !autoRets {
+		return
+	}
 	for _, fn := range funcnames {
-		needEntry := len(fetchArgs[fn]) == 0
-		needRet := len(retFetchArgs[fn]) == 0
+		needEntry := autoArgs && len(fetchArgs[fn]) == 0
+		needRet := autoRets && len(retFetchArgs[fn]) == 0
 		if !needEntry && !needRet {
 			continue
 		}
@@ -120,7 +131,7 @@ type flatCtx struct {
 	broken bool
 }
 
-func (c *flatCtx) full() bool { return len(c.out) >= maxAutoFetchArgs }
+func (c *flatCtx) full() bool { return len(c.out) >= MaxFetchArgs }
 
 func (c *flatCtx) nextWord() string {
 	if c.wi >= len(c.words) {
@@ -151,12 +162,13 @@ func flattenWord(t dwarf.Type, name string, c *flatCtx) {
 	case *dwarf.PtrType:
 		if _, ok := underlying(tt.Type).(*dwarf.StructType); ok {
 			// pointer to struct: consume the pointer word, then dereference
-			// and flatten the struct fields.
+			// and flatten the struct fields. The pointer may be nil, so every
+			// field is marked for nil-checking against this word.
 			reg := c.nextWord()
 			if reg == "" {
 				return
 			}
-			flattenMemory(tt.Type, name, reg, 0, c)
+			flattenMemory(tt.Type, name, reg, 0, true, name, c)
 			return
 		}
 		if size, signed, ok := scalarInfo(t); ok {
@@ -177,7 +189,7 @@ func flattenWord(t dwarf.Type, name string, c *flatCtx) {
 			if data == "" || ln == "" {
 				return
 			}
-			c.out = append(c.out, stringDataSpec(name+".data", data, 0, false))
+			c.out = append(c.out, stringDataSpec(name+".data", data, 0, false, false, ""))
 			c.out = append(c.out, scalarRegSpec(name+".len", 8, "s", ln))
 		case isSlice(tt):
 			data := c.nextWord()
@@ -216,36 +228,38 @@ func flattenWord(t dwarf.Type, name string, c *flatCtx) {
 }
 
 // flattenMemory flattens a value located at memory address (base + offset).
-// It is used to dereference a struct pointer.
-func flattenMemory(t dwarf.Type, name string, base string, offset int64, c *flatCtx) {
+// It is used to dereference a struct pointer. nilCheck/nilRoot are propagated
+// to every leaf value so that, when the base pointer is nil, the whole group
+// can be collapsed into a single "nil" instead of dereferencing address 0.
+func flattenMemory(t dwarf.Type, name string, base string, offset int64, nilCheck bool, nilRoot string, c *flatCtx) {
 	t = underlying(t)
 	switch tt := t.(type) {
 	case *dwarf.StructType:
 		switch {
 		case isString(tt):
-			c.out = append(c.out, stringDataSpec(name+".data", base, offset, true))
-			c.out = append(c.out, memScalarSpec(name+".len", 8, "s", base, offset+8))
+			c.out = append(c.out, stringDataSpec(name+".data", base, offset, true, nilCheck, nilRoot))
+			c.out = append(c.out, memScalarSpec(name+".len", 8, "s", base, offset+8, nilCheck, nilRoot))
 		case isSlice(tt):
-			c.out = append(c.out, memScalarSpec(name+".data", 8, "u", base, offset))
-			c.out = append(c.out, memScalarSpec(name+".len", 8, "s", base, offset+8))
-			c.out = append(c.out, memScalarSpec(name+".cap", 8, "s", base, offset+16))
+			c.out = append(c.out, memScalarSpec(name+".data", 8, "u", base, offset, nilCheck, nilRoot))
+			c.out = append(c.out, memScalarSpec(name+".len", 8, "s", base, offset+8, nilCheck, nilRoot))
+			c.out = append(c.out, memScalarSpec(name+".cap", 8, "s", base, offset+16, nilCheck, nilRoot))
 		case isInterface(tt):
-			c.out = append(c.out, memScalarSpec(name+".itab", 8, "u", base, offset))
-			c.out = append(c.out, memScalarSpec(name+".data", 8, "u", base, offset+8))
+			c.out = append(c.out, memScalarSpec(name+".itab", 8, "u", base, offset, nilCheck, nilRoot))
+			c.out = append(c.out, memScalarSpec(name+".data", 8, "u", base, offset+8, nilCheck, nilRoot))
 		default:
 			for _, f := range tt.Field {
 				if c.full() {
 					return
 				}
-				flattenMemory(f.Type, name+"."+f.Name, base, offset+f.ByteOffset, c)
+				flattenMemory(f.Type, name+"."+f.Name, base, offset+f.ByteOffset, nilCheck, nilRoot, c)
 			}
 		}
 	case *dwarf.PtrType:
 		// nested pointer: print its value, no further dereferencing.
-		c.out = append(c.out, memScalarSpec(name, 8, "u", base, offset))
+		c.out = append(c.out, memScalarSpec(name, 8, "u", base, offset, nilCheck, nilRoot))
 	default:
 		if size, signed, ok := scalarInfo(t); ok {
-			c.out = append(c.out, memScalarSpec(name, size, signed, base, offset))
+			c.out = append(c.out, memScalarSpec(name, size, signed, base, offset, nilCheck, nilRoot))
 			return
 		}
 		log.Debugf("auto-fetch: unsupported nested type %s (%T) for %q, skipped", t.String(), t, name)
@@ -264,12 +278,12 @@ func scalarRegSpec(name string, size int, signed, reg string) argSpec {
 	return argSpec{name: name, size: size, typ: typeStr(signed, size), reg: reg}
 }
 
-func memScalarSpec(name string, size int, signed, base string, offset int64) argSpec {
-	return argSpec{name: name, size: size, typ: typeStr(signed, size), reg: base, mem: true, offset: offset}
+func memScalarSpec(name string, size int, signed, base string, offset int64, nilCheck bool, nilRoot string) argSpec {
+	return argSpec{name: name, size: size, typ: typeStr(signed, size), reg: base, mem: true, offset: offset, nilCheck: nilCheck, nilRoot: nilRoot}
 }
 
-func stringDataSpec(name, reg string, offset int64, deref bool) argSpec {
-	return argSpec{name: name, size: 8, typ: "c64", reg: reg, mem: true, offset: offset, deref: deref}
+func stringDataSpec(name, reg string, offset int64, deref bool, nilCheck bool, nilRoot string) argSpec {
+	return argSpec{name: name, size: 8, typ: "c64", reg: reg, mem: true, offset: offset, deref: deref, nilCheck: nilCheck, nilRoot: nilRoot}
 }
 
 func typeStr(signed string, size int) string {

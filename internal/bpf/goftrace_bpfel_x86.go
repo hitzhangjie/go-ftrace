@@ -14,8 +14,10 @@ import (
 )
 
 type GoftraceArgData struct {
-	Goid uint64
-	Data [64]uint8
+	Goid  uint64
+	Data  [64]uint8
+	IsNil uint8
+	_     [7]byte
 }
 
 type GoftraceArgRule struct {
@@ -25,6 +27,8 @@ type GoftraceArgRule struct {
 	Length      uint8
 	Offsets     [8]int16
 	Dereference [8]uint8
+	NilCheck    uint8
+	_           [1]byte
 }
 
 type GoftraceArgRules struct {

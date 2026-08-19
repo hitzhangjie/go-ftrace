@@ -133,6 +133,35 @@ func TestAutoFetchReturnValues(t *testing.T) {
 	}
 }
 
+func TestAutoFetchNilCheck(t *testing.T) {
+	bin := buildFixture(t, "../../testdata/rets/main.go")
+	e, err := elf.New(bin)
+	if err != nil {
+		t.Fatalf("elf.New: %v", err)
+	}
+
+	// main.send returns *MeshError: every flattened field must be marked for
+	// nil-checking under the shared root "ret0".
+	_, ra := autoFetchArgs(e, "main.send")
+	if len(ra) == 0 {
+		t.Fatalf("no return args derived for main.send")
+	}
+	for _, a := range ra {
+		if !a.NilCheck {
+			t.Errorf("main.send field %q: NilCheck = false, want true", a.Varname)
+		}
+		if a.NilRoot != "ret0" {
+			t.Errorf("main.send field %q: NilRoot = %q, want ret0", a.Varname, a.NilRoot)
+		}
+	}
+
+	// main.add returns a plain int: no nil-checking.
+	_, ra = autoFetchArgs(e, "main.add")
+	if len(ra) == 0 || ra[0].NilCheck || ra[0].NilRoot != "" {
+		t.Errorf("main.add: unexpected nil-check metadata: %+v", ra)
+	}
+}
+
 func TestFillAutoFetchPrecedence(t *testing.T) {
 	bin := buildFixture(t, "../../testdata/args/main.go")
 	e, err := elf.New(bin)
@@ -150,7 +179,7 @@ func TestFillAutoFetchPrecedence(t *testing.T) {
 	}
 	fetchArgs["main.add"] = []*FetchArg{explicit}
 
-	fillAutoFetch(e, []string{"main.add", "main.greet"}, fetchArgs, retFetchArgs)
+	fillAutoFetch(e, []string{"main.add", "main.greet"}, fetchArgs, retFetchArgs, true, true)
 
 	if len(fetchArgs["main.add"]) != 1 || fetchArgs["main.add"][0].Rules[0].Register != "bx" {
 		t.Errorf("explicit entry rule for main.add was overwritten: %v", fetchArgs["main.add"])

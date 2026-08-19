@@ -31,7 +31,8 @@ type Config struct {
 	frets           []string
 	drilldown       string
 	trimprefix      string
-	autoFetch       bool
+	autoFetchArgs   bool
+	autoFetchRets   bool
 }
 
 // NewTracer create a new tracer for ELF executable `bin`, it attach uprobes listed in `uprobeWildcards`,
@@ -165,7 +166,8 @@ func (t *Tracer) Start() (err error) {
 		FuncNames:        funcs,
 		FetchFuncArgs:    fetchArgs,
 		RetFetchFuncArgs: retFetchArgs,
-		AutoFetch:        t.cfg.autoFetch,
+		AutoFetchArgs:    t.cfg.autoFetchArgs,
+		AutoFetchRets:    t.cfg.autoFetchRets,
 	})
 	if err != nil {
 		return
