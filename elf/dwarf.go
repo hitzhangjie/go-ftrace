@@ -2,9 +2,11 @@ package elf
 
 import (
 	"debug/dwarf"
+	"fmt"
 	"io"
 	"sort"
 
+	"github.com/go-delve/delve/pkg/dwarf/godwarf"
 	"github.com/pkg/errors"
 )
 
@@ -23,6 +25,56 @@ func (e *ELF) IterDebugInfo() <-chan *dwarf.Entry {
 		}
 	}()
 	return ch
+}
+
+// RuntimeType resolves a runtime type descriptor address to its DWARF type.
+// Go emits DW_AT_go_runtime_type as an offset from runtime.types for each type
+// DIE. The target binaries supported by go-ftrace are non-PIE, so the address
+// observed in an interface value can be matched directly against this table.
+func (e *ELF) RuntimeType(addr uint64) (dwarf.Type, error) {
+	types, err := e.runtimeTypes()
+	if err != nil {
+		return nil, err
+	}
+	t, ok := types[addr]
+	if !ok {
+		return nil, fmt.Errorf("runtime type %#x not found in DWARF", addr)
+	}
+	return t, nil
+}
+
+func (e *ELF) runtimeTypes() (map[uint64]dwarf.Type, error) {
+	if v, ok := e.cache["runtimeTypes"]; ok {
+		return v.(map[uint64]dwarf.Type), nil
+	}
+
+	typesBase, err := e.ResolveSymbol("runtime.types")
+	if err != nil {
+		return nil, fmt.Errorf("resolve runtime.types: %w", err)
+	}
+
+	types := make(map[uint64]dwarf.Type)
+	r := e.dwarfData.Reader()
+	for {
+		entry, err := r.Next()
+		if err != nil {
+			return nil, fmt.Errorf("read DWARF runtime types: %w", err)
+		}
+		if entry == nil {
+			break
+		}
+		off, ok := entry.Val(godwarf.AttrGoRuntimeType).(uint64)
+		if !ok {
+			continue
+		}
+		t, err := e.dwarfData.Type(entry.Offset)
+		if err != nil {
+			continue
+		}
+		types[typesBase.Value+off] = t
+	}
+	e.cache["runtimeTypes"] = types
+	return types, nil
 }
 
 // NonInlinedSubprogramDIEs returns the DIE entries of non-inlined subprograms

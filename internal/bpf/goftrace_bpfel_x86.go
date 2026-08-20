@@ -14,11 +14,10 @@ import (
 )
 
 type GoftraceArgData struct {
-	Goid  uint64
-	Data  [64]uint8
-	IsNil uint8
-	_     [3]byte
-	Pid   uint32
+	Data      [64]uint8
+	IsNil     uint8
+	ReadError uint8
+	Padding   [6]uint8
 }
 
 type GoftraceArgRule struct {
@@ -47,7 +46,9 @@ type GoftraceEvent struct {
 	TimeNs   uint64
 	Pid      uint32
 	Location uint8
-	_        [3]byte
+	ArgCount uint8
+	Padding  [2]uint8
+	Args     [8]GoftraceArgData
 }
 
 // LoadGoftrace returns the embedded CollectionSpec for Goftrace.
@@ -100,11 +101,9 @@ type GoftraceProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type GoftraceMapSpecs struct {
-	ArgQueue        *ebpf.MapSpec `ebpf:"arg_queue"`
 	ArgRulesMap     *ebpf.MapSpec `ebpf:"arg_rules_map"`
-	ArgStack        *ebpf.MapSpec `ebpf:"arg_stack"`
+	EventBuffer     *ebpf.MapSpec `ebpf:"event_buffer"`
 	EventQueue      *ebpf.MapSpec `ebpf:"event_queue"`
-	EventStack      *ebpf.MapSpec `ebpf:"event_stack"`
 	ShouldTraceGoid *ebpf.MapSpec `ebpf:"should_trace_goid"`
 	ShouldTraceRip  *ebpf.MapSpec `ebpf:"should_trace_rip"`
 }
@@ -128,22 +127,18 @@ func (o *GoftraceObjects) Close() error {
 //
 // It can be passed to LoadGoftraceObjects or ebpf.CollectionSpec.LoadAndAssign.
 type GoftraceMaps struct {
-	ArgQueue        *ebpf.Map `ebpf:"arg_queue"`
 	ArgRulesMap     *ebpf.Map `ebpf:"arg_rules_map"`
-	ArgStack        *ebpf.Map `ebpf:"arg_stack"`
+	EventBuffer     *ebpf.Map `ebpf:"event_buffer"`
 	EventQueue      *ebpf.Map `ebpf:"event_queue"`
-	EventStack      *ebpf.Map `ebpf:"event_stack"`
 	ShouldTraceGoid *ebpf.Map `ebpf:"should_trace_goid"`
 	ShouldTraceRip  *ebpf.Map `ebpf:"should_trace_rip"`
 }
 
 func (m *GoftraceMaps) Close() error {
 	return _GoftraceClose(
-		m.ArgQueue,
 		m.ArgRulesMap,
-		m.ArgStack,
+		m.EventBuffer,
 		m.EventQueue,
-		m.EventStack,
 		m.ShouldTraceGoid,
 		m.ShouldTraceRip,
 	)

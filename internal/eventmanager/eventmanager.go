@@ -10,7 +10,6 @@ import (
 	"github.com/hitzhangjie/go-ftrace/elf"
 	"github.com/hitzhangjie/go-ftrace/internal/bpf"
 	"github.com/hitzhangjie/go-ftrace/internal/uprobe"
-	log "github.com/sirupsen/logrus"
 )
 
 // event.Location values, aligned with internal/bpf/ftrace.c (ENTPOINT/RETPOINT).
@@ -30,7 +29,6 @@ type Event struct {
 // EventManager manages events
 type EventManager struct {
 	elf     *elf.ELF
-	argCh   <-chan bpf.GoftraceArgData
 	uprobes map[string]uprobe.Uprobe
 
 	drilldown  string
@@ -55,11 +53,6 @@ type pidState struct {
 	goEvents     map[uint64][]Event // k=goid,v=[]event
 	goEventStack map[uint64]uint64
 
-	// argMu guards goArgs, which is written by the arg-dispatch goroutine
-	// (handleArg) and read by the event-handling goroutine (nextArg).
-	argMu  sync.RWMutex
-	goArgs map[uint64]chan bpf.GoftraceArgData
-
 	// agg holds per-function clustering statistics keyed by function name.
 	// Clustering is scoped per-pid so that the summary never mixes the
 	// latency/return-value distributions of different process instances.
@@ -70,7 +63,6 @@ func newPidState() *pidState {
 	return &pidState{
 		goEvents:     map[uint64][]Event{},
 		goEventStack: map[uint64]uint64{},
-		goArgs:       map[uint64]chan bpf.GoftraceArgData{},
 		agg:          map[string]*funcAgg{},
 	}
 }
@@ -140,7 +132,7 @@ func newFuncAgg() *funcAgg {
 }
 
 // New create a new EventManager, which receives events via `ch`
-func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GoftraceArgData, drilldown, trimprefix string, cluster bool) (_ *EventManager, err error) {
+func New(uprobes []uprobe.Uprobe, elf *elf.ELF, drilldown, trimprefix string, cluster bool) (_ *EventManager, err error) {
 	host, err := sysinfo.Host()
 	if err != nil {
 		return
@@ -152,7 +144,6 @@ func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GoftraceArgData, d
 	}
 	m := &EventManager{
 		elf:        elf,
-		argCh:      ch,
 		uprobes:    uprobesMap,
 		drilldown:  drilldown,
 		trimprefix: trimprefix,
@@ -160,47 +151,7 @@ func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GoftraceArgData, d
 		pids:       map[uint32]*pidState{},
 		bootTime:   bootTime,
 	}
-	go m.handleArg()
 	return m, err
-}
-
-// dispatches arguments to the per-goroutine channel of the process they belong
-// to. args are keyed by (pid, goid) via the per-pid state hierarchy.
-func (m *EventManager) handleArg() {
-	for arg := range m.argCh {
-		ch := m.pidState(arg.Pid).ensureArgChan(arg.Goid)
-		log.Debugf("add arg %+v", arg)
-		ch <- arg
-	}
-}
-
-// ensureArgChan returns the per-goroutine arg channel of the given process,
-// creating it lazily if it does not yet exist.
-func (s *pidState) ensureArgChan(goid uint64) chan bpf.GoftraceArgData {
-	s.argMu.RLock()
-	ch := s.goArgs[goid]
-	s.argMu.RUnlock()
-	if ch != nil {
-		return ch
-	}
-
-	s.argMu.Lock()
-	defer s.argMu.Unlock()
-	// double-checked locking: another goroutine may have created it between
-	// the RUnlock above and the Lock here.
-	if ch = s.goArgs[goid]; ch == nil {
-		ch = make(chan bpf.GoftraceArgData, 1000)
-		s.goArgs[goid] = ch
-	}
-	return ch
-}
-
-// argChan returns the per-goroutine arg channel of the given process, or nil
-// if it has not been created yet.
-func (s *pidState) argChan(goid uint64) chan bpf.GoftraceArgData {
-	s.argMu.RLock()
-	defer s.argMu.RUnlock()
-	return s.goArgs[goid]
 }
 
 // GetUprobe returns the uprobe of the given event

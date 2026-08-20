@@ -1,6 +1,7 @@
 package uprobe
 
 import (
+	"debug/dwarf"
 	"fmt"
 	"os"
 	"os/exec"
@@ -117,11 +118,11 @@ func TestAutoFetchReturnValues(t *testing.T) {
 		},
 		{
 			fn:       "main.mayFail",
-			expected: []string{"ret0.itab=(%ax):u64", "ret0.data=(%bx):u64"},
+			expected: []string{"ret0.type=(+8(%ax)):u64", "ret0.data=(%bx):u64", "ret0.value=(+0(%bx)):c512"},
 		},
 		{
 			fn:       "main.send",
-			expected: []string{"ret0.Code=(+0(%ax)):s64", "ret0.Detail.itab=(+8(%ax)):u64", "ret0.Detail.data=(+16(%ax)):u64"},
+			expected: []string{"ret0.Code=(+0(%ax)):s64", "ret0.Detail.type=(*+8(%ax)):u64", "ret0.Detail.data=(+16(%ax)):u64", "ret0.Detail.value=(*+16(%ax)):c512"},
 		},
 	}
 
@@ -156,6 +157,59 @@ func TestAutoFetchNilCheck(t *testing.T) {
 	_, _, ra, _ = autoFetchArgs(e, "main.add")
 	if len(ra) == 0 || ra[0].NilCheck {
 		t.Errorf("main.add: unexpected nil-check metadata: %+v", ra)
+	}
+}
+
+func TestAutoFetchInterfaceLimits(t *testing.T) {
+	intType := &dwarf.IntType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{Name: "int", ByteSize: 8}}}
+	ifaceType := &dwarf.StructType{
+		CommonType: dwarf.CommonType{Name: "runtime.iface", ByteSize: 16},
+		StructName: "runtime.iface",
+		Field:      []*dwarf.StructField{{Name: "tab"}, {Name: "data", ByteOffset: 8}},
+	}
+	fields := make([]*dwarf.StructField, 0, 7)
+	for i := 0; i < 6; i++ {
+		fields = append(fields, &dwarf.StructField{Name: fmt.Sprintf("F%d", i), ByteOffset: int64(i * 8), Type: intType})
+	}
+	fields = append(fields, &dwarf.StructField{Name: "Err", ByteOffset: 48, Type: ifaceType})
+	st := &dwarf.StructType{
+		CommonType: dwarf.CommonType{Name: "main.Result", ByteSize: 64},
+		StructName: "main.Result",
+		Field:      fields,
+	}
+
+	args, values := deriveArgs(nil, []*elf.Variable{{Name: "v", Type: st}})
+	if len(args) > MaxFetchArgs {
+		t.Fatalf("derived %d args, max is %d", len(args), MaxFetchArgs)
+	}
+	if len(values) != 1 || values[0].leafCount() != len(args) {
+		t.Fatalf("value tree leaves do not match args: values=%+v args=%d", values, len(args))
+	}
+	if len(args) != 6 {
+		t.Fatalf("partial interface should be skipped atomically: got %d args, want 6", len(args))
+	}
+}
+
+func TestAutoFetchEmptyInterfaceInMemory(t *testing.T) {
+	efaceType := &dwarf.StructType{
+		CommonType: dwarf.CommonType{Name: "runtime.eface", ByteSize: 16},
+		StructName: "runtime.eface",
+		Field:      []*dwarf.StructField{{Name: "_type"}, {Name: "data", ByteOffset: 8}},
+	}
+	outer := &dwarf.StructType{
+		CommonType: dwarf.CommonType{Name: "main.Outer", ByteSize: 24},
+		StructName: "main.Outer",
+		Field:      []*dwarf.StructField{{Name: "Any", ByteOffset: 8, Type: efaceType}},
+	}
+	ptr := &dwarf.PtrType{CommonType: dwarf.CommonType{Name: "*main.Outer", ByteSize: 8}, Type: outer}
+
+	args, _ := deriveArgs(nil, []*elf.Variable{{Name: "v", Type: ptr}})
+	if len(args) != 3 {
+		t.Fatalf("got %d args, want 3", len(args))
+	}
+	typeArg := args[0]
+	if len(typeArg.Rules) != 2 || typeArg.Rules[1].Offset != 8 || typeArg.Rules[1].Dereference {
+		t.Fatalf("empty-interface type rule = %+v, want direct memory read at +8", typeArg.Rules)
 	}
 }
 

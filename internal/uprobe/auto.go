@@ -27,13 +27,14 @@ type argSpec struct {
 	size int
 	typ  string // "s8"..."s64", "u8"..."u64", "f32","f64", "bool", "c512"
 
-	// location. When mem is false the value is read directly from the
-	// register reg. When mem is true the value is read from memory at
-	// (reg + offset), with an optional pointer dereference beforehand.
+	// location. When rules is empty, the compact reg/mem fields describe a
+	// direct register or one-step memory read. rules is used for paths that
+	// need multiple dereferences, notably an interface's dynamic data word.
 	reg    string
 	mem    bool
 	offset int64
 	deref  bool
+	rules  []*ArgRule
 
 	// nilCheck marks a value whose base register holds a possibly-nil
 	// pointer; the BPF program reports the fetched value as nil (is_nil=1)
@@ -42,9 +43,12 @@ type argSpec struct {
 }
 
 func (s argSpec) fetchArg() *FetchArg {
-	rules := []*ArgRule{{From: Register, Register: s.reg}}
-	if s.mem {
-		rules = append(rules, &ArgRule{From: Stack, Offset: s.offset, Dereference: s.deref})
+	rules := s.rules
+	if len(rules) == 0 {
+		rules = []*ArgRule{{From: Register, Register: s.reg}}
+		if s.mem {
+			rules = append(rules, &ArgRule{From: Stack, Offset: s.offset, Dereference: s.deref})
+		}
 	}
 	return &FetchArg{
 		Varname:  s.name,
@@ -96,16 +100,16 @@ func autoFetchArgs(elf *elf.ELF, funcname string) (entryArgs []*FetchArg, entryV
 		return nil, nil, nil, nil
 	}
 
-	entryArgs, entryValues = deriveArgs(args)
-	retArgs, retValues = deriveRets(rets)
+	entryArgs, entryValues = deriveArgs(elf, args)
+	retArgs, retValues = deriveRets(elf, rets)
 	return entryArgs, entryValues, retArgs, retValues
 }
 
 // deriveArgs builds FetchArgs for input parameters by flattening each type
 // tree into words and assigning them to integer registers in Go ABI order.
 // It also builds the type-aware value tree used for debugger-style rendering.
-func deriveArgs(vars []*elf.Variable) ([]*FetchArg, []*Value) {
-	ctx := &flatCtx{out: []argSpec{}, words: abiRegs, wi: 0}
+func deriveArgs(elf *elf.ELF, vars []*elf.Variable) ([]*FetchArg, []*Value) {
+	ctx := &flatCtx{out: []argSpec{}, words: abiRegs, wi: 0, elf: elf}
 	var values []*Value
 	for _, v := range vars {
 		if ctx.full() {
@@ -120,8 +124,8 @@ func deriveArgs(vars []*elf.Variable) ([]*FetchArg, []*Value) {
 
 // deriveRets builds FetchArgs for return values by assigning the flattened
 // return words to registers in Go ABI order, together with the value tree.
-func deriveRets(vars []*elf.Variable) ([]*FetchArg, []*Value) {
-	ctx := &flatCtx{out: []argSpec{}, words: abiRegs, wi: 0}
+func deriveRets(elf *elf.ELF, vars []*elf.Variable) ([]*FetchArg, []*Value) {
+	ctx := &flatCtx{out: []argSpec{}, words: abiRegs, wi: 0, elf: elf}
 	var values []*Value
 	for _, v := range vars {
 		if ctx.full() {
@@ -148,9 +152,18 @@ type flatCtx struct {
 	wi     int
 	out    []argSpec
 	broken bool
+	elf    *elf.ELF
 }
 
 func (c *flatCtx) full() bool { return len(c.out) >= MaxFetchArgs }
+
+func (c *flatCtx) reserve(n int) bool {
+	if len(c.out)+n <= MaxFetchArgs {
+		return true
+	}
+	c.broken = true
+	return false
+}
 
 func (c *flatCtx) nextWord() string {
 	if c.wi >= len(c.words) {
@@ -164,7 +177,7 @@ func (c *flatCtx) nextWord() string {
 
 func (c *flatCtx) build() []*FetchArg {
 	if c.broken {
-		log.Warnf("auto-fetch: too many words, some arguments were skipped")
+		log.Warnf("auto-fetch: register or fetch-argument limit reached, some values were skipped")
 	}
 	out := make([]*FetchArg, 0, len(c.out))
 	for _, s := range c.out {
@@ -200,7 +213,7 @@ func flattenWord(t dwarf.Type, name string, c *flatCtx) *Value {
 				return nil
 			}
 			node := flattenMemory(tt.Type, name, reg, 0, true, c)
-			if node == nil {
+			if node == nil || (c.broken && node.leafCount() == 0) {
 				return nil
 			}
 			return &Value{Kind: KindStructPtr, Name: name, Fields: node.Fields, StructName: node.StructName}
@@ -216,6 +229,9 @@ func flattenWord(t dwarf.Type, name string, c *flatCtx) *Value {
 	case *dwarf.StructType:
 		switch {
 		case isString(tt):
+			if !c.reserve(2) {
+				return nil
+			}
 			data := c.nextWord()
 			ln := c.nextWord()
 			if data == "" || ln == "" {
@@ -225,6 +241,9 @@ func flattenWord(t dwarf.Type, name string, c *flatCtx) *Value {
 			c.out = append(c.out, scalarRegSpec(name+".len", 8, "s64", ln))
 			return &Value{Kind: KindString, Name: name}
 		case isSlice(tt):
+			if !c.reserve(3) {
+				return nil
+			}
 			data := c.nextWord()
 			ln := c.nextWord()
 			cap := c.nextWord()
@@ -236,14 +255,15 @@ func flattenWord(t dwarf.Type, name string, c *flatCtx) *Value {
 			c.out = append(c.out, scalarRegSpec(name+".cap", 8, "s64", cap))
 			return &Value{Kind: KindSlice, Name: name, ElemType: tt.StructName}
 		case isInterface(tt):
-			itab := c.nextWord()
-			data := c.nextWord()
-			if itab == "" || data == "" {
+			if !c.reserve(3) {
 				return nil
 			}
-			c.out = append(c.out, scalarRegSpec(name+".itab", 8, "u64", itab))
-			c.out = append(c.out, scalarRegSpec(name+".data", 8, "u64", data))
-			return &Value{Kind: KindInterface, Name: name}
+			typeReg := c.nextWord()
+			dataReg := c.nextWord()
+			if typeReg == "" || dataReg == "" {
+				return nil
+			}
+			return flattenInterfaceWord(tt, name, typeReg, dataReg, c)
 		default:
 			var fields []*Value
 			for _, f := range tt.Field {
@@ -252,6 +272,8 @@ func flattenWord(t dwarf.Type, name string, c *flatCtx) *Value {
 				}
 				if child := flattenWord(f.Type, name+"."+f.Name, c); child != nil {
 					fields = append(fields, child)
+				} else if c.broken {
+					break
 				}
 			}
 			return &Value{Kind: KindStruct, Name: name, Fields: fields, StructName: tt.StructName}
@@ -282,18 +304,25 @@ func flattenMemory(t dwarf.Type, name string, base string, offset int64, nilChec
 	case *dwarf.StructType:
 		switch {
 		case isString(tt):
+			if !c.reserve(2) {
+				return nil
+			}
 			c.out = append(c.out, stringDataSpec(name+".data", base, offset, true, nilCheck))
 			c.out = append(c.out, memScalarSpec(name+".len", 8, "s64", base, offset+8, nilCheck))
 			return &Value{Kind: KindString, Name: name}
 		case isSlice(tt):
+			if !c.reserve(3) {
+				return nil
+			}
 			c.out = append(c.out, memScalarSpec(name+".data", 8, "u64", base, offset, nilCheck))
 			c.out = append(c.out, memScalarSpec(name+".len", 8, "s64", base, offset+8, nilCheck))
 			c.out = append(c.out, memScalarSpec(name+".cap", 8, "s64", base, offset+16, nilCheck))
 			return &Value{Kind: KindSlice, Name: name, ElemType: tt.StructName}
 		case isInterface(tt):
-			c.out = append(c.out, memScalarSpec(name+".itab", 8, "u64", base, offset, nilCheck))
-			c.out = append(c.out, memScalarSpec(name+".data", 8, "u64", base, offset+8, nilCheck))
-			return &Value{Kind: KindInterface, Name: name}
+			if !c.reserve(3) {
+				return nil
+			}
+			return flattenInterfaceMemory(tt, name, base, offset, nilCheck, c)
 		default:
 			var fields []*Value
 			for _, f := range tt.Field {
@@ -302,6 +331,8 @@ func flattenMemory(t dwarf.Type, name string, base string, offset int64, nilChec
 				}
 				if child := flattenMemory(f.Type, name+"."+f.Name, base, offset+f.ByteOffset, nilCheck, c); child != nil {
 					fields = append(fields, child)
+				} else if c.broken {
+					break
 				}
 			}
 			return &Value{Kind: KindStruct, Name: name, Fields: fields, StructName: tt.StructName}
@@ -331,6 +362,55 @@ func memScalarSpec(name string, size int, typ, base string, offset int64, nilChe
 
 func stringDataSpec(name, reg string, offset int64, deref bool, nilCheck bool) argSpec {
 	return argSpec{name: name, size: autoStringSize, typ: "c" + strconv.Itoa(autoStringSize*8), reg: reg, mem: true, offset: offset, deref: deref, nilCheck: nilCheck}
+}
+
+func rulesSpec(name string, size int, typ string, rules []*ArgRule, nilCheck bool) argSpec {
+	return argSpec{name: name, size: size, typ: typ, rules: rules, nilCheck: nilCheck}
+}
+
+func flattenInterfaceWord(st *dwarf.StructType, name, typeReg, dataReg string, c *flatCtx) *Value {
+	nonEmpty := interfaceIsNonEmpty(st)
+	typeRules := []*ArgRule{{From: Register, Register: typeReg}}
+	if nonEmpty {
+		// iface.tab points to abi.ITab; ITab.Type is the second pointer word.
+		typeRules = append(typeRules, &ArgRule{From: Stack, Offset: 8, Dereference: false})
+	}
+	c.out = append(c.out, rulesSpec(name+".type", 8, "u64", typeRules, false))
+	c.out = append(c.out, scalarRegSpec(name+".data", 8, "u64", dataReg))
+	// Capture a stable prefix of the concrete value while the target thread is
+	// stopped at the probe. Nested pointer-backed data can then be completed by
+	// the userspace memory reader during recursive rendering.
+	c.out = append(c.out, rulesSpec(name+".value", autoStringSize, "c512", []*ArgRule{
+		{From: Register, Register: dataReg},
+		{From: Stack, Offset: 0, Dereference: false},
+	}, false))
+	return &Value{Kind: KindInterface, Name: name, InterfaceNonEmpty: nonEmpty, RuntimeType: c.elf.RuntimeType}
+}
+
+func flattenInterfaceMemory(st *dwarf.StructType, name, base string, offset int64, nilCheck bool, c *flatCtx) *Value {
+	nonEmpty := interfaceIsNonEmpty(st)
+	typeRules := []*ArgRule{{From: Register, Register: base}}
+	if nonEmpty {
+		// *(base+offset) is the itab pointer; its second word is the concrete type.
+		typeRules = append(typeRules,
+			&ArgRule{From: Stack, Offset: offset, Dereference: true},
+			&ArgRule{From: Stack, Offset: 8, Dereference: false})
+	} else {
+		// eface._type is already the concrete type pointer stored at base+offset.
+		typeRules = append(typeRules, &ArgRule{From: Stack, Offset: offset, Dereference: false})
+	}
+	c.out = append(c.out, rulesSpec(name+".type", 8, "u64", typeRules, nilCheck))
+	c.out = append(c.out, memScalarSpec(name+".data", 8, "u64", base, offset+8, nilCheck))
+	c.out = append(c.out, rulesSpec(name+".value", autoStringSize, "c512", []*ArgRule{
+		{From: Register, Register: base},
+		{From: Stack, Offset: offset + 8, Dereference: true},
+		{From: Stack, Offset: 0, Dereference: false},
+	}, nilCheck))
+	return &Value{Kind: KindInterface, Name: name, InterfaceNonEmpty: nonEmpty, RuntimeType: c.elf.RuntimeType}
+}
+
+func interfaceIsNonEmpty(st *dwarf.StructType) bool {
+	return st.StructName == "runtime.iface" || hasFields(st, "tab", "data")
 }
 
 // underlying unwraps typedef and qualifier chains.

@@ -35,7 +35,21 @@ struct config
 // CONFIG is overwritten by `spec.RewriteConstants(map[string]interface{}{"CONFIG": cfg})`
 static volatile const struct config CONFIG = {};
 
-// bpf write event data when enter/exit a function
+// One fetched leaf. read_error is set when any userspace memory read needed
+// by the rule fails; userspace must render that leaf as unavailable rather
+// than interpreting the zeroed payload as a real value.
+struct arg_data
+{
+	__u8 data[MAX_DATA_SIZE];
+	__u8 is_nil;
+	__u8 read_error;
+	__u8 padding[6];
+};
+
+// One queue element contains the event and all of its fetched leaves. Keeping
+// them in a single record is essential: two independent FIFO queues can be
+// overwritten independently under load and permanently associate one event
+// with another event's arguments.
 struct event
 {
 	__u64 goid;
@@ -46,10 +60,14 @@ struct event
 	__u64 time_ns;
 	__u32 pid;
 	__u8 location;
+	__u8 arg_count;
+	__u8 padding[2];
+	struct arg_data args[8];
 };
 
-// force emitting struct event into the ELF.
+// force emitting these structs into the ELF.
 const struct event *_ __attribute__((unused));
+const struct arg_data *___ __attribute__((unused));
 
 // arg_rule.type values; they must stay in sync with the Go ArgLocation enum
 // (Register = 0, Stack = 1) in internal/uprobe/fetcharg.go.
@@ -83,20 +101,6 @@ struct arg_rules
 
 const struct arg_rules *__ __attribute__((unused));
 
-struct arg_data
-{
-	__u64 goid;
-	__u8 data[MAX_DATA_SIZE];
-	// set to 1 when the arg could not be dereferenced because its base
-	// pointer was nil; the data payload is left zeroed in that case.
-	__u8 is_nil;
-	// pid of the process that produced this arg, used by userspace to
-	// disambiguate goroutine IDs across multiple process instances.
-	__u32 pid;
-};
-
-const struct arg_data *___ __attribute__((unused));
-
 // key of `should_trace_goid` map. It is scoped by pid so that goroutine IDs
 // belonging to different process instances of the same binary do not collide:
 // two processes may both have a goroutine whose goid is, say, 42.
@@ -119,20 +123,6 @@ struct bpf_map_def SEC("maps") arg_rules_map = {
 	.max_entries = 100,
 };
 
-struct bpf_map_def SEC("maps") arg_queue = {
-	.type = BPF_MAP_TYPE_QUEUE,
-	.key_size = 0,
-	.value_size = sizeof(struct arg_data),
-	.max_entries = 10000,
-};
-
-struct bpf_map_def SEC("maps") arg_stack = {
-	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
-	.key_size = sizeof(__u32),
-	.value_size = sizeof(struct arg_data),
-	.max_entries = 1,
-};
-
 struct bpf_map_def SEC("maps") event_queue = {
 	.type = BPF_MAP_TYPE_QUEUE,
 	.key_size = 0,
@@ -140,7 +130,7 @@ struct bpf_map_def SEC("maps") event_queue = {
 	.max_entries = 10000,
 };
 
-struct bpf_map_def SEC("maps") event_stack = {
+struct bpf_map_def SEC("maps") event_buffer = {
 	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
 	.key_size = sizeof(__u32),
 	.value_size = sizeof(struct event),
@@ -243,8 +233,6 @@ static __always_inline void read_reg(struct pt_regs *ctx, __u8 reg, __u64 *regva
 static __always_inline void fetch_args_from_reg(struct pt_regs *ctx, struct arg_data *data, struct arg_rule *rule)
 {
 	read_reg(ctx, rule->reg, (__u64 *)&data->data);
-	bpf_map_push_elem(&arg_queue, data, BPF_EXIST);
-	return;
 }
 
 static __always_inline void fetch_args_from_memory(struct pt_regs *ctx, struct arg_data *data, struct arg_rule *rule)
@@ -259,7 +247,6 @@ static __always_inline void fetch_args_from_memory(struct pt_regs *ctx, struct a
 	if (rule->nil_check && addr == 0)
 	{
 		data->is_nil = 1;
-		bpf_map_push_elem(&arg_queue, data, BPF_EXIST);
 		return;
 	}
 
@@ -269,7 +256,11 @@ static __always_inline void fetch_args_from_memory(struct pt_regs *ctx, struct a
 		// if expr = *+8(+2(%eax)), for *+8 part, we need to dereference the address
 		if (rule->dereference[i] == 1)
 		{
-			bpf_probe_read_user(&addr, sizeof(addr), (void *)addr + rule->offsets[i]);
+			if (bpf_probe_read_user(&addr, sizeof(addr), (void *)addr + rule->offsets[i]) != 0)
+			{
+				data->read_error = 1;
+				return;
+			}
 		}
 		// if the rule is +2 part, then we just add the offset to the address
 		else
@@ -280,35 +271,25 @@ static __always_inline void fetch_args_from_memory(struct pt_regs *ctx, struct a
 
 	// finally, we got the EA (effective address), then read the data from it,
 	// make sure the data size is not larger than MAX_DATA_SIZE
-	bpf_probe_read_user(&data->data,
+	if (bpf_probe_read_user(&data->data,
 						rule->size < MAX_DATA_SIZE ? rule->size : MAX_DATA_SIZE,
-						(void *)addr);
-	// put the read data into the queue
-	bpf_map_push_elem(&arg_queue, data, BPF_EXIST);
-	return;
+						(void *)addr) != 0)
+		data->read_error = 1;
 }
 
-// fetch arguments by rules
-static __always_inline void fetch_args(struct pt_regs *ctx, __u64 goid, __u64 ip)
+// Fetch all leaves directly into the event scratch value. The whole event is
+// subsequently pushed once, so queue overwrite can only drop a complete event.
+static __always_inline void fetch_args(struct pt_regs *ctx, struct event *e)
 {
-	// first get the rules by ip if we have
-	struct arg_rules *rules = bpf_map_lookup_elem(&arg_rules_map, &ip);
+	struct arg_rules *rules = bpf_map_lookup_elem(&arg_rules_map, &e->ip);
 	if (!rules)
 		return;
 
-	__u32 key = 0;
-	struct arg_data *data = bpf_map_lookup_elem(&arg_stack, &key);
-	if (!data)
-		return;
-
-	__builtin_memset(data, 0, sizeof(*data));
-	data->goid = goid;
-	data->pid = get_pid();
-
+	e->arg_count = rules->length;
 	for (int i = 0; i < 8 && i < rules->length; i++)
 	{
-		// data is reused across rules; reset the nil marker before each fetch.
-		data->is_nil = 0;
+		struct arg_data *data = &e->args[i];
+		__builtin_memset(data, 0, sizeof(*data));
 		switch (rules->rules[i].type)
 		{
 		case ARG_RULE_REG:
@@ -325,7 +306,7 @@ SEC("uprobe/ent")
 int ent(struct pt_regs *ctx)
 {
 	__u32 key = 0;
-	struct event *e = bpf_map_lookup_elem(&event_stack, &key);
+	struct event *e = bpf_map_lookup_elem(&event_buffer, &key);
 	if (!e)
 		return 0;
 	__builtin_memset(e, 0, sizeof(*e));
@@ -360,7 +341,7 @@ int ent(struct pt_regs *ctx)
 	if (!CONFIG.fetch_args)
 		goto cont;
 
-	fetch_args(ctx, e->goid, e->ip);
+	fetch_args(ctx, e);
 
 cont:
 	return bpf_map_push_elem(&event_queue, e, BPF_EXIST);
@@ -370,7 +351,7 @@ SEC("uprobe/ret")
 int ret(struct pt_regs *ctx)
 {
 	__u32 key = 0;
-	struct event *e = bpf_map_lookup_elem(&event_stack, &key);
+	struct event *e = bpf_map_lookup_elem(&event_buffer, &key);
 	if (!e)
 		return 0;
 	__builtin_memset(e, 0, sizeof(*e));
@@ -391,7 +372,7 @@ int ret(struct pt_regs *ctx)
 	if (!CONFIG.fetch_args)
 		goto cont;
 
-	fetch_args(ctx, e->goid, e->ip);
+	fetch_args(ctx, e);
 
 cont:
 	return bpf_map_push_elem(&event_queue, e, BPF_EXIST);
@@ -401,7 +382,7 @@ SEC("uprobe/goroutine_exit")
 int goroutine_exit(struct pt_regs *ctx)
 {
 	__u32 key = 0;
-	struct event *e = bpf_map_lookup_elem(&event_stack, &key);
+	struct event *e = bpf_map_lookup_elem(&event_buffer, &key);
 	if (!e)
 		return 0;
 	__builtin_memset(e, 0, sizeof(*e));

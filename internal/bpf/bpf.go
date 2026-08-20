@@ -75,7 +75,7 @@ func (b *BPF) Load(uprobes []uprobe.Uprobe, opts LoadOptions) (err error) {
 			return
 		}
 		b.closers = append(b.closers, b.objs.EventQueue)
-		b.closers = append(b.closers, b.objs.EventStack)
+		b.closers = append(b.closers, b.objs.EventBuffer)
 	}()
 
 	fetchArgs := false
@@ -205,27 +205,6 @@ func (b *BPF) PollEvents(ctx context.Context) chan GoftraceEvent {
 					continue
 				}
 				ch <- event
-			}
-		}
-	}()
-	return ch
-}
-
-func (b *BPF) PollArg(ctx context.Context) <-chan GoftraceArgData {
-	ch := make(chan GoftraceArgData)
-	go func() {
-		defer close(ch)
-		for {
-			data := GoftraceArgData{}
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if err := b.objs.ArgQueue.LookupAndDelete(nil, &data); err != nil {
-					time.Sleep(time.Millisecond)
-					continue
-				}
-				ch <- data
 			}
 		}
 	}()

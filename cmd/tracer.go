@@ -224,29 +224,28 @@ requireConfirm:
 	defer stop()
 
 	// create eventmanager to poll events, prepare the callstack and print
-	mgr, err := eventmanager.New(uprobes, t.elf, t.bpf.PollArg(ctx),
+	mgr, err := eventmanager.New(uprobes, t.elf,
 		t.cfg.drilldown,
 		t.cfg.trimprefix,
 		t.cfg.cluster)
 	if err != nil {
 		return
 	}
-	events := t.bpf.PollEvents(ctx)
 
 	// 聚类模式下按固定周期打印中间汇总（累计统计，不重置），
 	// 避免长时间运行时只能靠 Ctrl+C 才能看到结果。
-	var ticker *time.Ticker
 	var tickerCh <-chan time.Time
 	if t.cfg.cluster && t.cfg.clusterInterval > 0 {
-		ticker = time.NewTicker(t.cfg.clusterInterval)
+		ticker := time.NewTicker(t.cfg.clusterInterval)
 		tickerCh = ticker.C
 		defer ticker.Stop()
 	}
 
+	// 轮询并处理事件，更新统计并周期性打印
 loop:
 	for {
 		select {
-		case event, ok := <-events:
+		case event, ok := <-t.bpf.PollEvents(ctx):
 			if !ok {
 				break loop
 			}

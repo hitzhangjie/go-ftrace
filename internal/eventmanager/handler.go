@@ -1,18 +1,20 @@
 package eventmanager
 
 import (
+	"fmt"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/hitzhangjie/go-ftrace/internal/bpf"
 	up "github.com/hitzhangjie/go-ftrace/internal/uprobe"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
 )
 
 // Handle handles the event
 func (m *EventManager) Handle(event bpf.GoftraceEvent) error {
-	// goroutine 退出事件：回收该 goroutine 的参数 channel 与残留栈，避免
-	// goArgs 等 map 只增不减导致 OOM（详见 onGoroutineExit 注释）。
+	// goroutine 退出事件：回收该 goroutine 的残留调用栈。
 	if event.Location == eventLocationGoroutineExit {
 		m.onGoroutineExit(event.Pid, event.Goid)
 		return nil
@@ -60,14 +62,14 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) {
 		log.Errorf("failed to get uprobe for event %+v: %+v", event, err)
 		return
 	}
+	up.BindInterfaceMemory(uprobe.Values, processMemoryReader(event.Pid))
 
 	s := m.pidState(event.Pid)
 
 	length := len(s.goEvents[event.Goid])
 	if length == 0 && event.Location != eventLocationEntry {
-		// orphaned ret event (no matching entry recorded), drop it but still
-		// consume its args to keep the arg stream aligned
-		s.consumeArgs(event.Goid, len(uprobe.FetchArgs))
+		// Orphaned return: its arguments are part of this same event record, so
+		// dropping it cannot desynchronize subsequent events.
 		return
 	}
 	if length > 0 {
@@ -76,37 +78,11 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) {
 			// duplicated entry event due to stack expansion/shrinkage
 			log.Debugf("duplicated entry event: %+v", event)
 			s.goEvents[event.Goid][length-1].GoftraceEvent = event
-			s.consumeArgs(event.Goid, len(uprobe.FetchArgs))
 			return
 		}
 	}
-	// we need to fetch `len(uprobe.FetchArgs)` args. Consume them all first so
-	// both the type-aware renderer and the flat fallback see the same data.
-	leafData := make([]up.LeafData, 0, len(uprobe.FetchArgs))
-	for range uprobe.FetchArgs {
-		arg := s.nextArg(event.Goid)
-		leafData = append(leafData, up.LeafData{Data: arg.Data[:], IsNil: arg.IsNil != 0})
-	}
 
-	var argString string
-	if len(uprobe.Values) > 0 {
-		// debugger-style rendering of the argument / return values, using the
-		// DWARF-derived value tree. This yields e.g. `req=&Foo{Name:"x"}` or
-		// `ret0="hello"` instead of flat leaf pairs, which also makes cluster
-		// mode's return-value distribution far more meaningful.
-		argString = up.RenderValues(uprobe.Values, leafData)
-	} else {
-		// flat fallback for explicitly-configured --fargs/--frets rules.
-		args := make([]string, 0, len(uprobe.FetchArgs))
-		for i, fetchArg := range uprobe.FetchArgs {
-			if i > 0 {
-				args = append(args, ", ")
-			}
-			// varname = value
-			args = append(args, fetchArg.Varname, "=", fetchArg.SprintValue(leafData[i].Data))
-		}
-		argString = strings.Join(args, "")
-	}
+	argString := renderEventArgs(uprobe, event)
 
 	// append new event
 	s.goEvents[event.Goid] = append(s.goEvents[event.Goid], Event{
@@ -122,22 +98,57 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) {
 	}
 }
 
-// nextArg reads the next argument of the given goroutine from its arg channel.
-func (s *pidState) nextArg(goid uint64) bpf.GoftraceArgData {
-	var ch chan bpf.GoftraceArgData
-	for ch == nil {
-		ch = s.argChan(goid)
-		if ch == nil {
-			time.Sleep(time.Millisecond)
+func renderEventArgs(uprobe up.Uprobe, event bpf.GoftraceEvent) string {
+	expected := len(uprobe.FetchArgs)
+	actual := int(event.ArgCount)
+	if actual != expected || actual > len(event.Args) {
+		log.Warnf("drop arguments for %s: event contains %d leaves, expected %d", uprobe.Funcname, actual, expected)
+		return "<unavailable>"
+	}
+
+	leafData := make([]up.LeafData, actual)
+	for i := 0; i < actual; i++ {
+		arg := event.Args[i]
+		leafData[i] = up.LeafData{
+			Data:        arg.Data[:],
+			IsNil:       arg.IsNil != 0,
+			Unavailable: arg.ReadError != 0,
 		}
 	}
-	return <-ch
+
+	if len(uprobe.Values) > 0 {
+		return up.RenderValues(uprobe.Values, leafData)
+	}
+
+	args := make([]string, 0, actual)
+	for i, fetchArg := range uprobe.FetchArgs {
+		if i > 0 {
+			args = append(args, ", ")
+		}
+		value := "<unavailable>"
+		if !leafData[i].Unavailable {
+			value = fetchArg.SprintValue(leafData[i].Data)
+		}
+		args = append(args, fetchArg.Varname, "=", value)
+	}
+	return strings.Join(args, "")
 }
 
-// consumeArgs drops `n` arguments of the given goroutine from its arg channel.
-func (s *pidState) consumeArgs(goid uint64, n int) {
-	for i := 0; i < n; i++ {
-		s.nextArg(goid)
+func processMemoryReader(pid uint32) func(uint64, []byte) error {
+	return func(addr uint64, dst []byte) error {
+		if len(dst) == 0 {
+			return nil
+		}
+		local := unix.Iovec{Base: (*byte)(unsafe.Pointer(&dst[0]))}
+		local.SetLen(len(dst))
+		n, err := unix.ProcessVMReadv(int(pid), []unix.Iovec{local}, []unix.RemoteIovec{{Base: uintptr(addr), Len: len(dst)}}, 0)
+		if err != nil {
+			return err
+		}
+		if n != len(dst) {
+			return fmt.Errorf("short process memory read: got %d, want %d", n, len(dst))
+		}
+		return nil
 	}
 }
 
@@ -157,20 +168,10 @@ func (m *EventManager) ClearStack(event bpf.GoftraceEvent) {
 	delete(s.goEventStack, event.Goid)
 }
 
-// onGoroutineExit 回收已退出 goroutine 的相关资源，防止 goArgs 无限增长。
-//
-// 内核 goroutine_exit 探针在 goroutine 真正退出时触发：此时该 goroutine 不会再产生
-// 任何 ent/ret 事件与参数，且其此前产生的参数也已在对应的 ent/ret 事件处理中配对
-// 消费完毕（事件与参数严格 1:1 配对）。因此其参数 channel 此刻一定为空，可安全删除。
-//
-// 这里只 delete 不 close：goroutine 退出后 arg_queue 中已无该 goid 的存量参数，
-// handleArg 不会再向该 channel 发送，delete 后 channel 失去引用即被 GC 回收；
-// 若 close 则可能与 handleArg 的并发发送竞争触发 "send on closed channel" panic。
+// onGoroutineExit clears any incomplete call stack retained for a goroutine.
+// Arguments need no separate cleanup because they are embedded in each event.
 func (m *EventManager) onGoroutineExit(pid uint32, goid uint64) {
 	s := m.pidState(pid)
-	s.argMu.Lock()
-	delete(s.goArgs, goid)
-	s.argMu.Unlock()
 	delete(s.goEvents, goid)
 	delete(s.goEventStack, goid)
 }

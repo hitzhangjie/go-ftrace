@@ -1,6 +1,7 @@
 package uprobe
 
 import (
+	"debug/dwarf"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -41,12 +42,39 @@ type Value struct {
 	// Rendering annotations.
 	StructName string // KindStruct / KindStructPtr
 	ElemType   string // KindSlice (slice type name, e.g. "[]int")
+
+	// Interface metadata. RuntimeType maps the captured runtime type pointer to
+	// its DWARF definition; it is deliberately excluded from leaf accounting.
+	InterfaceNonEmpty bool
+	RuntimeType       func(uint64) (dwarf.Type, error)
+	ReadMemory        func(uint64, []byte) error
 }
 
 // LeafData carries the raw bytes and nil marker of one fetched leaf value.
 type LeafData struct {
-	Data  []byte
-	IsNil bool
+	Data        []byte
+	IsNil       bool
+	Unavailable bool
+}
+
+// BindInterfaceMemory attaches a process-specific memory reader to every
+// interface node, including interfaces nested in structs. Static values are
+// fully described and fetched by their precomputed rules, while an interface's
+// concrete type is known only at runtime and may require following pointers to
+// render its dynamic value.
+func BindInterfaceMemory(values []*Value, readMemory func(uint64, []byte) error) {
+	var bind func(*Value)
+	bind = func(v *Value) {
+		if v.Kind == KindInterface {
+			v.ReadMemory = readMemory
+		}
+		for _, field := range v.Fields {
+			bind(field)
+		}
+	}
+	for _, v := range values {
+		bind(v)
+	}
 }
 
 // RenderValues renders a list of top-level values into a single
@@ -62,6 +90,21 @@ func RenderValues(values []*Value, data []LeafData) string {
 }
 
 func renderNode(v *Value, data []LeafData, cur *int) string {
+	leaves := v.leafCount()
+	if leaves > 0 && *cur+leaves > len(data) {
+		*cur = len(data)
+		return "<unavailable>"
+	}
+
+	if v.Kind != KindStruct && v.Kind != KindStructPtr {
+		for i := 0; i < leaves; i++ {
+			if data[*cur+i].Unavailable {
+				*cur += leaves
+				return "<unavailable>"
+			}
+		}
+	}
+
 	switch v.Kind {
 	case KindScalar, KindBool, KindFloat, KindPointer:
 		d := data[*cur]
@@ -106,16 +149,38 @@ func renderNode(v *Value, data []LeafData, cur *int) string {
 		return fmt.Sprintf("%s(len=%d, cap=%d)", typ, ln, cp)
 
 	case KindInterface:
-		tab := data[*cur]
+		typeD := data[*cur]
 		*cur++
-		val := data[*cur]
+		dataD := data[*cur]
 		*cur++
-		tv := binary.LittleEndian.Uint64(tab.Data)
-		vv := binary.LittleEndian.Uint64(val.Data)
-		if tv == 0 && vv == 0 {
+		valueD := data[*cur]
+		*cur++
+		typeAddr := readUint(typeD.Data)
+		dataAddr := readUint(dataD.Data)
+		if typeAddr == 0 {
 			return "nil"
 		}
-		return fmt.Sprintf("interface{tab=0x%x, data=0x%x}", tv, vv)
+		if v.RuntimeType == nil {
+			return "interface{type=<unknown>, value=<unavailable>}"
+		}
+		t, err := v.RuntimeType(typeAddr)
+		if err != nil {
+			return "interface{type=<unknown>, value=<unavailable>}"
+		}
+		direct, err := runtimeTypeIsDirect(typeAddr, v.ReadMemory)
+		if err != nil {
+			return t.String() + "(<unavailable>)"
+		}
+		if direct {
+			if ptr, ok := underlying(t).(*dwarf.PtrType); ok {
+				if dataAddr == 0 {
+					return "nil"
+				}
+				return "&" + renderDynamicValue(ptr.Type, valueD.Data, dataAddr, v.RuntimeType, v.ReadMemory, 1)
+			}
+			return renderDynamicValue(t, dataD.Data, dataAddr, v.RuntimeType, v.ReadMemory, 0)
+		}
+		return renderDynamicValue(t, valueD.Data, dataAddr, v.RuntimeType, v.ReadMemory, 0)
 
 	case KindStruct:
 		return renderStruct(v, data, cur)
@@ -168,6 +233,151 @@ func shortName(name string) string {
 	return name
 }
 
+const maxDynamicDepth = 8
+
+type runtimeTypeResolver func(uint64) (dwarf.Type, error)
+type memoryReader func(uint64, []byte) error
+
+// runtimeTypeIsDirect supports both Go <=1.25 (direct bit in Kind at +23)
+// and Go >=1.26 (direct bit in TFlag at +20). The common runtime type prefix
+// has kept these byte offsets stable on amd64.
+func runtimeTypeIsDirect(typeAddr uint64, readMemory memoryReader) (bool, error) {
+	if readMemory == nil {
+		return false, fmt.Errorf("process memory reader unavailable")
+	}
+	var header [24]byte
+	if err := readMemory(typeAddr, header[:]); err != nil {
+		return false, err
+	}
+	const directIface = byte(1 << 5)
+	return header[20]&directIface != 0 || header[23]&directIface != 0, nil
+}
+
+func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runtimeTypeResolver, readMemory memoryReader, depth int) string {
+	if depth >= maxDynamicDepth {
+		return "<max-depth>"
+	}
+	t = underlying(t)
+	switch tt := t.(type) {
+	case *dwarf.PtrType:
+		ptr := readUint(data)
+		if ptr == 0 {
+			return "nil"
+		}
+		pointee := underlying(tt.Type)
+		if readMemory == nil || pointee.Size() <= 0 || pointee.Size() > autoStringSize {
+			return tt.String() + "(<unavailable>)"
+		}
+		buf := make([]byte, pointee.Size())
+		if err := readMemory(ptr, buf); err != nil {
+			return tt.String() + "(<unavailable>)"
+		}
+		return "&" + renderDynamicValue(tt.Type, buf, ptr, resolveType, readMemory, depth+1)
+	case *dwarf.StructType:
+		switch {
+		case isString(tt):
+			if len(data) < 16 {
+				return `"<unavailable>"`
+			}
+			strAddr := readUint(data)
+			strLen := int64(binary.LittleEndian.Uint64(data[8:16]))
+			if strLen == 0 {
+				return `""`
+			}
+			if strLen < 0 || readMemory == nil {
+				return `"<unavailable>"`
+			}
+			n := strLen
+			truncated := false
+			if n > autoStringSize {
+				n = autoStringSize
+				truncated = true
+			}
+			buf := make([]byte, n)
+			if err := readMemory(strAddr, buf); err != nil {
+				return `"<unavailable>"`
+			}
+			q := strconv.Quote(string(buf))
+			if truncated {
+				q = q[:len(q)-1] + "...\""
+			}
+			return q
+		case isSlice(tt):
+			if len(data) < 24 {
+				return tt.StructName + "(<unavailable>)"
+			}
+			return fmt.Sprintf("%s(len=%d, cap=%d)", tt.StructName,
+				int64(binary.LittleEndian.Uint64(data[8:16])), int64(binary.LittleEndian.Uint64(data[16:24])))
+		case isInterface(tt):
+			if len(data) < 16 {
+				return "interface{type=<unknown>, value=<unavailable>}"
+			}
+			typeAddr := readUint(data)
+			dataAddr := readUint(data[8:])
+			if typeAddr == 0 {
+				return "nil"
+			}
+			if resolveType == nil || readMemory == nil {
+				return "interface{type=<unknown>, value=<unavailable>}"
+			}
+			if interfaceIsNonEmpty(tt) {
+				var typeWord [8]byte
+				if err := readMemory(typeAddr+8, typeWord[:]); err != nil {
+					return "interface{type=<unknown>, value=<unavailable>}"
+				}
+				typeAddr = readUint(typeWord[:])
+			}
+			dynamicType, err := resolveType(typeAddr)
+			if err != nil {
+				return "interface{type=<unknown>, value=<unavailable>}"
+			}
+			direct, err := runtimeTypeIsDirect(typeAddr, readMemory)
+			if err != nil {
+				return dynamicType.String() + "(<unavailable>)"
+			}
+			if direct {
+				var word [8]byte
+				binary.LittleEndian.PutUint64(word[:], dataAddr)
+				return renderDynamicValue(dynamicType, word[:], dataAddr, resolveType, readMemory, depth+1)
+			}
+			size := dynamicType.Size()
+			if size <= 0 || size > autoStringSize {
+				size = autoStringSize
+			}
+			value := make([]byte, size)
+			if dataAddr == 0 || readMemory(dataAddr, value) != nil {
+				return dynamicType.String() + "(<unavailable>)"
+			}
+			return renderDynamicValue(dynamicType, value, dataAddr, resolveType, readMemory, depth+1)
+		default:
+			var b strings.Builder
+			b.WriteString(tt.StructName)
+			b.WriteByte('{')
+			for i, f := range tt.Field {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(f.Name)
+				b.WriteByte(':')
+				start := int(f.ByteOffset)
+				if start < 0 || start >= len(data) {
+					b.WriteString("<unavailable>")
+					continue
+				}
+				b.WriteString(renderDynamicValue(f.Type, data[start:], addr+uint64(start), resolveType, readMemory, depth+1))
+			}
+			b.WriteByte('}')
+			return b.String()
+		}
+	default:
+		kind, typ, size, ok := scalarValue(t)
+		if !ok || size > len(data) {
+			return "<unavailable>"
+		}
+		return renderLeaf(&Value{Kind: kind, Typ: typ, Size: size}, data[:size])
+	}
+}
+
 func renderLeaf(v *Value, data []byte) string {
 	switch v.Kind {
 	case KindBool:
@@ -218,8 +428,10 @@ func (v *Value) leafCount() int {
 	switch v.Kind {
 	case KindScalar, KindBool, KindFloat, KindPointer:
 		return 1
-	case KindString, KindInterface:
+	case KindString:
 		return 2
+	case KindInterface:
+		return 3
 	case KindSlice:
 		return 3
 	case KindStruct, KindStructPtr:
