@@ -72,7 +72,7 @@ func TestAutoFetchEntryArgs(t *testing.T) {
 		},
 		{
 			fn:       "main.greet",
-			expected: []string{"name.data=(+0(%ax)):c64", "name.len=(%bx):s64"},
+			expected: []string{"name.data=(+0(%ax)):c512", "name.len=(%bx):s64"},
 		},
 		{
 			fn:       "main.sum",
@@ -80,17 +80,17 @@ func TestAutoFetchEntryArgs(t *testing.T) {
 		},
 		{
 			fn:       "main.toggle",
-			expected: []string{"on=(%ax):u8"},
+			expected: []string{"on=(%ax):bool"},
 		},
 		{
 			fn:       "main.(*Student).String",
-			expected: []string{"s.Name.data=(*+0(%ax)):c64", "s.Name.len=(+8(%ax)):s64", "s.Age=(+16(%ax)):s64"},
+			expected: []string{"s.Name.data=(*+0(%ax)):c512", "s.Name.len=(+8(%ax)):s64", "s.Age=(+16(%ax)):s64"},
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.fn, func(t *testing.T) {
-			ea, _ := autoFetchArgs(e, c.fn)
+			ea, _, _, _ := autoFetchArgs(e, c.fn)
 			assertArgs(t, "arg", ea, c.expected)
 		})
 	}
@@ -127,7 +127,7 @@ func TestAutoFetchReturnValues(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.fn, func(t *testing.T) {
-			_, ra := autoFetchArgs(e, c.fn)
+			_, _, ra, _ := autoFetchArgs(e, c.fn)
 			assertArgs(t, "ret", ra, c.expected)
 		})
 	}
@@ -141,8 +141,8 @@ func TestAutoFetchNilCheck(t *testing.T) {
 	}
 
 	// main.send returns *MeshError: every flattened field must be marked for
-	// nil-checking under the shared root "ret0".
-	_, ra := autoFetchArgs(e, "main.send")
+	// nil-checking so the value renders as nil when the pointer is nil.
+	_, _, ra, _ := autoFetchArgs(e, "main.send")
 	if len(ra) == 0 {
 		t.Fatalf("no return args derived for main.send")
 	}
@@ -150,14 +150,11 @@ func TestAutoFetchNilCheck(t *testing.T) {
 		if !a.NilCheck {
 			t.Errorf("main.send field %q: NilCheck = false, want true", a.Varname)
 		}
-		if a.NilRoot != "ret0" {
-			t.Errorf("main.send field %q: NilRoot = %q, want ret0", a.Varname, a.NilRoot)
-		}
 	}
 
 	// main.add returns a plain int: no nil-checking.
-	_, ra = autoFetchArgs(e, "main.add")
-	if len(ra) == 0 || ra[0].NilCheck || ra[0].NilRoot != "" {
+	_, _, ra, _ = autoFetchArgs(e, "main.add")
+	if len(ra) == 0 || ra[0].NilCheck {
 		t.Errorf("main.add: unexpected nil-check metadata: %+v", ra)
 	}
 }
@@ -171,6 +168,8 @@ func TestFillAutoFetchPrecedence(t *testing.T) {
 
 	fetchArgs := map[string][]*FetchArg{}
 	retFetchArgs := map[string][]*FetchArg{}
+	argValues := map[string][]*Value{}
+	retValues := map[string][]*Value{}
 
 	// Explicit entry rule for main.add must not be overwritten.
 	explicit, err := newFetchArg("a", "(%bx):s64")
@@ -179,7 +178,7 @@ func TestFillAutoFetchPrecedence(t *testing.T) {
 	}
 	fetchArgs["main.add"] = []*FetchArg{explicit}
 
-	fillAutoFetch(e, []string{"main.add", "main.greet"}, fetchArgs, retFetchArgs, true, true)
+	fillAutoFetch(e, []string{"main.add", "main.greet"}, fetchArgs, retFetchArgs, argValues, retValues, true, true)
 
 	if len(fetchArgs["main.add"]) != 1 || fetchArgs["main.add"][0].Rules[0].Register != "bx" {
 		t.Errorf("explicit entry rule for main.add was overwritten: %v", fetchArgs["main.add"])

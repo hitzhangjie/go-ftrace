@@ -17,10 +17,9 @@ type FetchArg struct {
 
 	// NilCheck marks a value whose base register holds a possibly-nil pointer
 	// (used for struct-pointer arguments/return values). When the fetched data
-	// reports nil, the flattened leaf fields are collapsed into a single
-	// "NilRoot = nil" instead of dereferencing address 0.
+	// reports nil, the value is rendered as nil instead of dereferencing
+	// address 0.
 	NilCheck bool
-	NilRoot  string
 }
 
 type ArgLocation int
@@ -207,6 +206,12 @@ func (f *FetchArg) SprintValue(data []uint8) (value string) {
 		value = fmt.Sprintf("%f", float32(binary.LittleEndian.Uint32(data)))
 	case "f64":
 		value = fmt.Sprintf("%f", float64(binary.LittleEndian.Uint64(data)))
+	case "bool":
+		if data[0] != 0 {
+			value = "true"
+		} else {
+			value = "false"
+		}
 	case "c8", "c16", "c32", "c64", "c128", "c256", "c512":
 		value = string(data[:f.Size])
 	}

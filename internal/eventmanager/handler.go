@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/hitzhangjie/go-ftrace/internal/bpf"
+	up "github.com/hitzhangjie/go-ftrace/internal/uprobe"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -79,37 +80,39 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) {
 			return
 		}
 	}
-	// we need to fetch `len(uprobe.FetchArgs)` args
-	args := []string{}
-	printedNil := map[string]bool{}
-	for _, fetchArg := range uprobe.FetchArgs {
+	// we need to fetch `len(uprobe.FetchArgs)` args. Consume them all first so
+	// both the type-aware renderer and the flat fallback see the same data.
+	leafData := make([]up.LeafData, 0, len(uprobe.FetchArgs))
+	for range uprobe.FetchArgs {
 		arg := s.nextArg(event.Goid)
-		// A nil-checked leaf belongs to a possibly-nil pointer (e.g. a struct
-		// pointer return value). When the pointer is nil, collapse the whole
-		// group of flattened fields into a single "root = nil" instead of
-		// printing each dereferenced field as garbage/zero.
-		if fetchArg.NilCheck && arg.IsNil != 0 {
-			if printedNil[fetchArg.NilRoot] {
-				continue
-			}
-			printedNil[fetchArg.NilRoot] = true
-			if len(args) > 0 {
+		leafData = append(leafData, up.LeafData{Data: arg.Data[:], IsNil: arg.IsNil != 0})
+	}
+
+	var argString string
+	if len(uprobe.Values) > 0 {
+		// debugger-style rendering of the argument / return values, using the
+		// DWARF-derived value tree. This yields e.g. `req=&Foo{Name:"x"}` or
+		// `ret0="hello"` instead of flat leaf pairs, which also makes cluster
+		// mode's return-value distribution far more meaningful.
+		argString = up.RenderValues(uprobe.Values, leafData)
+	} else {
+		// flat fallback for explicitly-configured --fargs/--frets rules.
+		args := make([]string, 0, len(uprobe.FetchArgs))
+		for i, fetchArg := range uprobe.FetchArgs {
+			if i > 0 {
 				args = append(args, ", ")
 			}
-			args = append(args, fetchArg.NilRoot, "=", "nil")
-			continue
+			// varname = value
+			args = append(args, fetchArg.Varname, "=", fetchArg.SprintValue(leafData[i].Data))
 		}
-		if len(args) > 0 {
-			args = append(args, ", ")
-		}
-		// varname = value
-		args = append(args, fetchArg.Varname, "=", fetchArg.SprintValue(arg.Data[:]))
+		argString = strings.Join(args, "")
 	}
+
 	// append new event
 	s.goEvents[event.Goid] = append(s.goEvents[event.Goid], Event{
 		GoftraceEvent: event,
 		uprobe:        &uprobe,
-		argString:     strings.Join(args, ""),
+		argString:     argString,
 	})
 	switch event.Location {
 	case eventLocationEntry:

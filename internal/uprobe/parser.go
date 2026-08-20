@@ -86,9 +86,11 @@ func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
 		}
 	}
 
-	// Fill in automatically derived fetch rules for functions that do not
-	// have explicit --fargs/--frets rules.
-	fillAutoFetch(elf, attachFuncs, fetchArgs, retFetchArgs, opts.AutoFetchArgs, opts.AutoFetchRets)
+	// Fill in automatically derived fetch rules (and their type-aware value
+	// trees) for functions that do not have explicit --fargs/--frets rules.
+	argValues := map[string][]*Value{}
+	retValues := map[string][]*Value{}
+	fillAutoFetch(elf, attachFuncs, fetchArgs, retFetchArgs, argValues, retValues, opts.AutoFetchArgs, opts.AutoFetchRets)
 
 	sym, err := elf.ResolveSymbol("runtime.goexit1")
 	if err != nil {
@@ -129,6 +131,7 @@ func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
 			AbsOffset: entOffset,
 			RelOffset: 0,
 			FetchArgs: fetchArgs[funcname],
+			Values:    argValues[funcname],
 			Wanted:    wanted,
 		})
 
@@ -146,14 +149,15 @@ func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
 		for _, retOffset := range retOffsets {
 			fmt.Fprintf(message, "0x%x ", retOffset)
 			uprobes = append(uprobes, Uprobe{
-				Funcname:  funcname,
-				Location:  AtRet,
+				Funcname: funcname,
+				Location: AtRet,
 				// the absolute virtual address of the RET instruction, used as
 				// the key of arg_rules_map when fetching return values
 				Address:   sym.Value + (retOffset - entOffset),
 				AbsOffset: retOffset,
 				RelOffset: retOffset - entOffset,
 				FetchArgs: retFetchArgs[funcname],
+				Values:    retValues[funcname],
 			})
 		}
 		fmt.Fprintf(message, "]")

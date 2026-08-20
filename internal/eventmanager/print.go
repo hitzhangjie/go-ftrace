@@ -106,7 +106,7 @@ func (m *EventManager) SprintArg(arg *uprobe.FetchArg, data []uint8) (_ string, 
 		return "", err
 	}
 	if offset != 0 {
-		return "", fmt.Errorf("not a valid __call__ target: %lld", addr)
+		return "", fmt.Errorf("not a valid __call__ target: %d", addr)
 	}
 	return fmt.Sprintf("__call__=%s", syms[0].Name), nil
 }
