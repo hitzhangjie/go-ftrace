@@ -10,11 +10,24 @@ import (
 
 // Handle handles the event
 func (m *EventManager) Handle(event bpf.GoftraceEvent) error {
+	// goroutine 退出事件：回收该 goroutine 的参数 channel 与残留栈，避免
+	// goArgs 等 map 只增不减导致 OOM（详见 onGoroutineExit 注释）。
+	if event.Location == eventLocationGoroutineExit {
+		m.onGoroutineExit(event.Goid)
+		return nil
+	}
 	m.Add(event)
 	log.Debugf("added event: %+v", event)
 	if m.CloseStack(event) {
 		// 有错没错都要清空栈
 		defer m.ClearStack(event)
+
+		// 聚类模式：不再逐条打印调用栈，而是按函数聚合延迟与返回值分布，
+		// 避免高频调用刷屏，同时降低与 grep/tee 等管道结合时的内存占用。
+		if m.cluster {
+			m.ClusterStack(event.Goid)
+			return nil
+		}
 
 		var needPrint bool
 
@@ -135,4 +148,63 @@ func (m *EventManager) CloseStack(event bpf.GoftraceEvent) bool {
 func (m *EventManager) ClearStack(event bpf.GoftraceEvent) {
 	delete(m.goEvents, event.Goid)
 	delete(m.goEventStack, event.Goid)
+}
+
+// onGoroutineExit 回收已退出 goroutine 的相关资源，防止 goArgs 无限增长。
+//
+// 内核 goroutine_exit 探针在 goroutine 真正退出时触发：此时该 goroutine 不会再产生
+// 任何 ent/ret 事件与参数，且其此前产生的参数也已在对应的 ent/ret 事件处理中配对
+// 消费完毕（事件与参数严格 1:1 配对）。因此其参数 channel 此刻一定为空，可安全删除。
+//
+// 这里只 delete 不 close：goroutine 退出后 arg_queue 中已无该 goid 的存量参数，
+// handleArg 不会再向该 channel 发送，delete 后 channel 失去引用即被 GC 回收；
+// 若 close 则可能与 handleArg 的并发发送竞争触发 "send on closed channel" panic。
+func (m *EventManager) onGoroutineExit(goid uint64) {
+	m.argMu.Lock()
+	delete(m.goArgs, goid)
+	m.argMu.Unlock()
+	delete(m.goEvents, goid)
+	delete(m.goEventStack, goid)
+}
+
+// ClusterStack aggregates the latency and return-value distributions of the
+// functions recorded on the given goroutine instead of printing each call.
+// Entry/ret events are paired in LIFO order to derive per-call latency, and
+// the flattened return-value string is counted for frequency distribution.
+func (m *EventManager) ClusterStack(goid uint64) {
+	var startTimes []uint64
+	for _, event := range m.goEvents[goid] {
+		switch event.Location {
+		case eventLocationEntry:
+			startTimes = append(startTimes, event.TimeNs)
+		case eventLocationRet:
+			if len(startTimes) == 0 {
+				continue
+			}
+			elapsed := event.TimeNs - startTimes[len(startTimes)-1]
+			startTimes = startTimes[:len(startTimes)-1]
+			m.recordCluster(event.uprobe.Funcname, time.Duration(elapsed), event.argString)
+		}
+	}
+}
+
+// recordCluster updates the aggregation counters for a single traced function.
+func (m *EventManager) recordCluster(funcname string, elapsed time.Duration, retval string) {
+	agg := m.agg[funcname]
+	if agg == nil {
+		agg = newFuncAgg()
+		m.agg[funcname] = agg
+	}
+	agg.calls++
+	idx := len(latencyBuckets) // overflow bucket
+	for i, b := range latencyBuckets {
+		if elapsed <= b.edge {
+			idx = i
+			break
+		}
+	}
+	agg.latencies[idx]++
+	if retval != "" {
+		agg.retvals[retval]++
+	}
 }

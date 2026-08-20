@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"github.com/hitzhangjie/go-ftrace/elf"
 	"github.com/hitzhangjie/go-ftrace/internal/bpf"
@@ -33,6 +34,8 @@ type Config struct {
 	trimprefix      string
 	autoFetchArgs   bool
 	autoFetchRets   bool
+	cluster         bool
+	clusterInterval time.Duration
 }
 
 // NewTracer create a new tracer for ELF executable `bin`, it attach uprobes listed in `uprobeWildcards`,
@@ -223,13 +226,36 @@ requireConfirm:
 	// create eventmanager to poll events, prepare the callstack and print
 	mgr, err := eventmanager.New(uprobes, t.elf, t.bpf.PollArg(ctx),
 		t.cfg.drilldown,
-		t.cfg.trimprefix)
+		t.cfg.trimprefix,
+		t.cfg.cluster)
 	if err != nil {
 		return
 	}
-	for event := range t.bpf.PollEvents(ctx) {
-		if err = mgr.Handle(event); err != nil {
-			return
+	events := t.bpf.PollEvents(ctx)
+
+	// 聚类模式下按固定周期打印中间汇总（累计统计，不重置），
+	// 避免长时间运行时只能靠 Ctrl+C 才能看到结果。
+	var ticker *time.Ticker
+	var tickerCh <-chan time.Time
+	if t.cfg.cluster && t.cfg.clusterInterval > 0 {
+		ticker = time.NewTicker(t.cfg.clusterInterval)
+		tickerCh = ticker.C
+		defer ticker.Stop()
+	}
+
+loop:
+	for {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				break loop
+			}
+			if err = mgr.Handle(event); err != nil {
+				return
+			}
+		case <-tickerCh:
+			fmt.Printf("\n[%s] periodic cluster summary (cumulative)\n", time.Now().Format("15:04:05"))
+			mgr.PrintClusterSummary()
 		}
 	}
 	return mgr.PrintRemaining()

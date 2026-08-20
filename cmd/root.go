@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -78,6 +79,20 @@ var rootCmd = &cobra.Command{
 		autoFetchArgs, _ := cmd.Flags().GetBool("fargs-auto")
 		autoFetchRets, _ := cmd.Flags().GetBool("frets-auto")
 
+		// An explicitly provided --fargs/--frets rule takes precedence over the
+		// corresponding automatic DWARF derivation, so disable auto-fetch when
+		// the user has explicitly set either flag.
+		if cmd.Flags().Changed("fargs") {
+			autoFetchArgs = false
+		}
+		if cmd.Flags().Changed("frets") {
+			autoFetchRets = false
+		}
+
+		cluster, _ := cmd.Flags().GetBool("cluster")
+		clusterInterval, _ := cmd.Flags().GetDuration("cluster-interval")
+		memlockLimit, _ := cmd.Flags().GetInt64("memlock-limit")
+
 		// positional fetch rules are kept for backward compatibility and are
 		// treated as entry argument fetch rules
 		fargs = append(fargs, args[1:]...)
@@ -91,13 +106,15 @@ var rootCmd = &cobra.Command{
 			trimprefix:      trimprefix,
 			autoFetchArgs:   autoFetchArgs,
 			autoFetchRets:   autoFetchRets,
+			cluster:         cluster,
+			clusterInterval: clusterInterval,
 		}
 		tracer, err := NewTracer(bin, cfg)
 		if err != nil {
 			return err
 		}
 
-		if err := initLimit(); err != nil {
+		if err := initLimit(memlockLimit); err != nil {
 			return err
 		}
 
@@ -135,14 +152,33 @@ func init() {
 	rootCmd.Flags().StringArrayP("frets", "r", nil, "fetch return values at function return, e.g. 'main.(*T).M(err=(*+0(%ax)):s64)'")
 	rootCmd.Flags().BoolP("fargs-auto", "A", true, "automatically derive entry-argument fetch rules from DWARF when no explicit --fargs rule is given")
 	rootCmd.Flags().BoolP("frets-auto", "R", true, "automatically derive return-value fetch rules from DWARF when no explicit --frets rule is given")
+	rootCmd.Flags().BoolP("cluster", "c", false, "aggregate per-function latency distribution and top-10 return values instead of printing every call")
+	rootCmd.Flags().Duration("cluster-interval", 5*time.Second, "periodic interval for printing the cumulative cluster summary (only valid with --cluster; 0 disables periodic printing and only prints on exit)")
+	rootCmd.Flags().Int64("memlock-limit", 0, "maximum amount of memory (in bytes) that may be locked via RLIMIT_MEMLOCK; 0 uses the built-in default")
 
 	rootCmd.MarkFlagRequired("uprobe-wildcards")
 }
 
-func initLimit() error {
+// defaultMemlockLimit caps how much memory the tracer process may lock
+// (RLIMIT_MEMLOCK). Previously this was set to RLIM_INFINITY, so a bug in the
+// tracer (or anything else in the process) could mlock unbounded amounts of
+// memory and destabilize the whole machine. The eBPF maps used by go-ftrace are
+// only a few MiB in total, so this cap is generous while still bounding the
+// worst-case impact.
+//
+// Note: on kernels >= 5.11 BPF map/program memory is accounted via memcg and no
+// longer charged against RLIMIT_MEMLOCK, so on modern kernels this limit mainly
+// guards mlock(2); on older kernels it also bounds BPF object memory.
+const defaultMemlockLimit = 128 << 20 // 128 MiB
+
+func initLimit(memlockLimit int64) error {
+	if memlockLimit <= 0 {
+		memlockLimit = defaultMemlockLimit
+	}
+
 	rlimit := syscall.Rlimit{
-		Cur: unix.RLIM_INFINITY,
-		Max: unix.RLIM_INFINITY,
+		Cur: uint64(memlockLimit),
+		Max: uint64(memlockLimit),
 	}
 	if err := syscall.Setrlimit(unix.RLIMIT_MEMLOCK, &rlimit); err != nil {
 		return fmt.Errorf("setrlimit RLIMIT_MEMLOCK: %w", err)

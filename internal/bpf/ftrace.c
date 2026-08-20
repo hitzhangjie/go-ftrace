@@ -7,6 +7,7 @@
 
 #define ENTPOINT 0
 #define RETPOINT 1
+#define GOROUTINE_EXIT 2
 
 // offset of `task_struct->thread_struct->fsbase`, `fsbase` contains the TLS
 // offset. On Linux register `FS` is used to load the TLS base address.
@@ -351,7 +352,15 @@ cont:
 SEC("uprobe/goroutine_exit")
 int goroutine_exit(struct pt_regs *ctx)
 {
-	__u64 goid = get_goid();
-	bpf_map_delete_elem(&should_trace_goid, &goid);
-	return 0;
+	__u32 key = 0;
+	struct event *e = bpf_map_lookup_elem(&event_stack, &key);
+	if (!e)
+		return 0;
+	__builtin_memset(e, 0, sizeof(*e));
+
+	e->goid = get_goid();
+	e->location = GOROUTINE_EXIT;
+	bpf_map_delete_elem(&should_trace_goid, &e->goid);
+
+	return bpf_map_push_elem(&event_queue, e, BPF_EXIST);
 }

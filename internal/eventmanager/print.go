@@ -2,6 +2,7 @@ package eventmanager
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -111,10 +112,67 @@ func (m *EventManager) SprintArg(arg *uprobe.FetchArg, data []uint8) (_ string, 
 }
 
 func (m *EventManager) PrintRemaining() (err error) {
+	if m.cluster {
+		// 收尾时把尚未闭合的栈也聚合进去，再输出聚类汇总。
+		for goid := range m.goEvents {
+			m.ClusterStack(goid)
+		}
+		m.PrintClusterSummary()
+		return nil
+	}
 	for goid := range m.goEvents {
 		if err = m.PrintStack(goid); err != nil {
 			break
 		}
 	}
 	return
+}
+
+// PrintClusterSummary prints the aggregated per-function latency distribution
+// and top-10 return-value frequency distribution.
+func (m *EventManager) PrintClusterSummary() {
+	funcs := make([]string, 0, len(m.agg))
+	for fn := range m.agg {
+		funcs = append(funcs, fn)
+	}
+	sort.Strings(funcs)
+
+	fmt.Println()
+	fmt.Println("==================== function latency & return-value summary ====================")
+	for _, fn := range funcs {
+		agg := m.agg[fn]
+		fmt.Printf("\n%s  (calls=%d)\n", fn, agg.calls)
+
+		fmt.Println("  latency distribution:")
+		for i, b := range latencyBuckets {
+			fmt.Printf("    %-10s %d\n", b.label, agg.latencies[i])
+		}
+		overflow := ">" + latencyBuckets[len(latencyBuckets)-1].edge.String()
+		fmt.Printf("    %-10s %d\n", overflow, agg.latencies[len(latencyBuckets)])
+
+		if len(agg.retvals) > 0 {
+			type kv struct {
+				v string
+				n uint64
+			}
+			kvs := make([]kv, 0, len(agg.retvals))
+			for v, n := range agg.retvals {
+				kvs = append(kvs, kv{v, n})
+			}
+			sort.Slice(kvs, func(i, j int) bool {
+				if kvs[i].n != kvs[j].n {
+					return kvs[i].n > kvs[j].n
+				}
+				return kvs[i].v < kvs[j].v
+			})
+			top := kvs
+			if len(top) > 10 {
+				top = top[:10]
+			}
+			fmt.Printf("  return values (top %d of %d distinct):\n", len(top), len(agg.retvals))
+			for _, e := range top {
+				fmt.Printf("    %-40s %d\n", e.v, e.n)
+			}
+		}
+	}
 }

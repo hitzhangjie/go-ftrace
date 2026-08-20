@@ -15,8 +15,9 @@ import (
 
 // event.Location values, aligned with internal/bpf/ftrace.c (ENTPOINT/RETPOINT).
 const (
-	eventLocationEntry uint8 = 0 // function entry
-	eventLocationRet   uint8 = 1 // function return
+	eventLocationEntry         uint8 = 0 // function entry
+	eventLocationRet           uint8 = 1 // function return
+	eventLocationGoroutineExit uint8 = 2 // goroutine exit
 )
 
 // Event represents a func enter/ret event, see ftrace.c event
@@ -34,6 +35,7 @@ type EventManager struct {
 
 	drilldown  string
 	trimprefix string
+	cluster    bool
 
 	goEvents     map[uint64][]Event // k=goid,v=[]event
 	goEventStack map[uint64]uint64
@@ -43,11 +45,45 @@ type EventManager struct {
 	argMu  sync.RWMutex
 	goArgs map[uint64]chan bpf.GoftraceArgData
 
+	// agg holds per-function clustering statistics keyed by function name.
+	agg map[string]*funcAgg
+
 	bootTime time.Time
 }
 
+// latencyBuckets defines the upper bound (inclusive) of each latency histogram
+// bucket. The final overflow bucket captures durations larger than the last
+// edge.
+var latencyBuckets = []struct {
+	edge  time.Duration
+	label string
+}{
+	{1 * time.Microsecond, "<=1us"},
+	{10 * time.Microsecond, "<=10us"},
+	{100 * time.Microsecond, "<=100us"},
+	{1 * time.Millisecond, "<=1ms"},
+	{10 * time.Millisecond, "<=10ms"},
+	{100 * time.Millisecond, "<=100ms"},
+	{1 * time.Second, "<=1s"},
+	{10 * time.Second, "<=10s"},
+}
+
+// funcAgg accumulates clustering statistics for a single traced function.
+type funcAgg struct {
+	calls     uint64
+	latencies []uint64 // len(latencyBuckets)+1, last element is the overflow bucket
+	retvals   map[string]uint64
+}
+
+func newFuncAgg() *funcAgg {
+	return &funcAgg{
+		latencies: make([]uint64, len(latencyBuckets)+1),
+		retvals:   map[string]uint64{},
+	}
+}
+
 // New create a new EventManager, which receives events via `ch`
-func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GoftraceArgData, drilldown, trimprefix string) (_ *EventManager, err error) {
+func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GoftraceArgData, drilldown, trimprefix string, cluster bool) (_ *EventManager, err error) {
 	host, err := sysinfo.Host()
 	if err != nil {
 		return
@@ -63,9 +99,11 @@ func New(uprobes []uprobe.Uprobe, elf *elf.ELF, ch <-chan bpf.GoftraceArgData, d
 		uprobes:      uprobesMap,
 		drilldown:    drilldown,
 		trimprefix:   trimprefix,
+		cluster:      cluster,
 		goEvents:     map[uint64][]Event{},
 		goEventStack: map[uint64]uint64{},
 		goArgs:       map[uint64]chan bpf.GoftraceArgData{},
+		agg:          map[string]*funcAgg{},
 		bootTime:     bootTime,
 	}
 	go m.handleArg()

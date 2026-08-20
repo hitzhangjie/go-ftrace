@@ -227,7 +227,6 @@ func (b *BPF) PollArg(ctx context.Context) <-chan GoftraceArgData {
 				}
 				ch <- data
 			}
-
 		}
 	}()
 	return ch
