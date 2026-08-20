@@ -17,7 +17,8 @@ type GoftraceArgData struct {
 	Goid  uint64
 	Data  [64]uint8
 	IsNil uint8
-	_     [7]byte
+	_     [3]byte
+	Pid   uint32
 }
 
 type GoftraceArgRule struct {
@@ -44,8 +45,9 @@ type GoftraceEvent struct {
 	CallerIp uint64
 	CallerBp uint64
 	TimeNs   uint64
+	Pid      uint32
 	Location uint8
-	_        [7]byte
+	_        [3]byte
 }
 
 // LoadGoftrace returns the embedded CollectionSpec for Goftrace.

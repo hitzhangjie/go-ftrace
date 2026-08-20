@@ -14,11 +14,11 @@ import (
 const placeholder = "        "
 
 // PrintStack print the callstack of a traced function
-func (m *EventManager) PrintStack(goid uint64) (err error) {
+func (m *EventManager) PrintStack(pid uint32, goid uint64) (err error) {
 	indent := ""
 	fmt.Println()
 	startTimeStack := []uint64{}
-	for _, event := range m.goEvents[goid] {
+	for _, event := range m.pidState(pid).goEvents[goid] {
 		lineInfo := "?:?"
 		t := m.bootTime.Add(time.Duration(event.TimeNs)).Format("02 15:04:05.0000")
 		syms, offset, err := m.elf.ResolveAddress(event.Ip)
@@ -112,17 +112,22 @@ func (m *EventManager) SprintArg(arg *uprobe.FetchArg, data []uint8) (_ string, 
 }
 
 func (m *EventManager) PrintRemaining() (err error) {
+	pids := m.snapshotPids()
 	if m.cluster {
 		// 收尾时把尚未闭合的栈也聚合进去，再输出聚类汇总。
-		for goid := range m.goEvents {
-			m.ClusterStack(goid)
+		for pid, s := range pids {
+			for goid := range s.goEvents {
+				m.ClusterStack(pid, goid)
+			}
 		}
 		m.PrintClusterSummary()
 		return nil
 	}
-	for goid := range m.goEvents {
-		if err = m.PrintStack(goid); err != nil {
-			break
+	for pid, s := range pids {
+		for goid := range s.goEvents {
+			if err = m.PrintStack(pid, goid); err != nil {
+				break
+			}
 		}
 	}
 	return
@@ -131,32 +136,58 @@ func (m *EventManager) PrintRemaining() (err error) {
 // PrintClusterSummary prints the aggregated per-function latency distribution
 // and top-10 return-value frequency distribution.
 func (m *EventManager) PrintClusterSummary() {
-	funcs := make([]string, 0, len(m.agg))
-	for fn := range m.agg {
+	pids := m.snapshotPids()
+
+	fmt.Println()
+	fmt.Println("==================== function latency & return-value summary ====================")
+
+	// Sort pids for deterministic output. When only a single process is
+	// traced, keep the previous compact format (no pid section headers).
+	if len(pids) == 1 {
+		for _, s := range pids {
+			m.printClusterSummary(s.agg)
+		}
+		return
+	}
+
+	ordered := make([]uint32, 0, len(pids))
+	for pid := range pids {
+		ordered = append(ordered, pid)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+
+	for _, pid := range ordered {
+		fmt.Printf("\n########## pid=%d ##########\n", pid)
+		m.printClusterSummary(pids[pid].agg)
+	}
+}
+
+// printClusterSummary renders the aggregation map for a single pidState.
+func (m *EventManager) printClusterSummary(agg map[string]*funcAgg) {
+	funcs := make([]string, 0, len(agg))
+	for fn := range agg {
 		funcs = append(funcs, fn)
 	}
 	sort.Strings(funcs)
 
-	fmt.Println()
-	fmt.Println("==================== function latency & return-value summary ====================")
 	for _, fn := range funcs {
-		agg := m.agg[fn]
-		fmt.Printf("\n%s  (calls=%d)\n", fn, agg.calls)
+		a := agg[fn]
+		fmt.Printf("\n%s  (calls=%d)\n", fn, a.calls)
 
 		fmt.Println("  latency distribution:")
 		for i, b := range latencyBuckets {
-			fmt.Printf("    %-10s %d\n", b.label, agg.latencies[i])
+			fmt.Printf("    %-10s %d\n", b.label, a.latencies[i])
 		}
 		overflow := ">" + latencyBuckets[len(latencyBuckets)-1].edge.String()
-		fmt.Printf("    %-10s %d\n", overflow, agg.latencies[len(latencyBuckets)])
+		fmt.Printf("    %-10s %d\n", overflow, a.latencies[len(latencyBuckets)])
 
-		if len(agg.retvals) > 0 {
+		if len(a.retvals) > 0 {
 			type kv struct {
 				v string
 				n uint64
 			}
-			kvs := make([]kv, 0, len(agg.retvals))
-			for v, n := range agg.retvals {
+			kvs := make([]kv, 0, len(a.retvals))
+			for v, n := range a.retvals {
 				kvs = append(kvs, kv{v, n})
 			}
 			sort.Slice(kvs, func(i, j int) bool {
@@ -169,7 +200,7 @@ func (m *EventManager) PrintClusterSummary() {
 			if len(top) > 10 {
 				top = top[:10]
 			}
-			fmt.Printf("  return values (top %d of %d distinct):\n", len(top), len(agg.retvals))
+			fmt.Printf("  return values (top %d of %d distinct):\n", len(top), len(a.retvals))
 			for _, e := range top {
 				fmt.Printf("    %-40s %d\n", e.v, e.n)
 			}

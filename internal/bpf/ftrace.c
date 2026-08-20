@@ -44,11 +44,20 @@ struct event
 	__u64 caller_ip;
 	__u64 caller_bp;
 	__u64 time_ns;
+	__u32 pid;
 	__u8 location;
 };
 
 // force emitting struct event into the ELF.
 const struct event *_ __attribute__((unused));
+
+// arg_rule.type values; they must stay in sync with the Go ArgLocation enum
+// (Register = 0, Stack = 1) in internal/uprobe/fetcharg.go.
+enum arg_rule_type
+{
+	ARG_RULE_REG = 0,
+	ARG_RULE_MEMORY = 1,
+};
 
 // fetch 1 arg needs several rules (at most 8 rules), each rule is a struct arg_rule
 struct arg_rule
@@ -81,9 +90,27 @@ struct arg_data
 	// set to 1 when the arg could not be dereferenced because its base
 	// pointer was nil; the data payload is left zeroed in that case.
 	__u8 is_nil;
+	// pid of the process that produced this arg, used by userspace to
+	// disambiguate goroutine IDs across multiple process instances.
+	__u32 pid;
 };
 
 const struct arg_data *___ __attribute__((unused));
+
+// key of `should_trace_goid` map. It is scoped by pid so that goroutine IDs
+// belonging to different process instances of the same binary do not collide:
+// two processes may both have a goroutine whose goid is, say, 42.
+//
+// The explicit `_pad` member keeps the key a deterministic 16 bytes (goid is
+// 8-byte aligned); without it the compiler would insert implicit padding whose
+// bytes are left unspecified by aggregate initialization, which would break
+// hash lookups.
+struct goid_key
+{
+	__u32 pid;
+	__u32 _pad;
+	__u64 goid;
+};
 
 struct bpf_map_def SEC("maps") arg_rules_map = {
 	.type = BPF_MAP_TYPE_HASH,
@@ -122,7 +149,7 @@ struct bpf_map_def SEC("maps") event_stack = {
 
 struct bpf_map_def SEC("maps") should_trace_goid = {
 	.type = BPF_MAP_TYPE_HASH,
-	.key_size = sizeof(__u64),
+	.key_size = sizeof(struct goid_key),
 	.value_size = sizeof(bool),
 	.max_entries = 10000,
 };
@@ -144,6 +171,16 @@ static __always_inline
 	bpf_probe_read_user(&g_addr, sizeof(g_addr), (void *)(tls_base + CONFIG.g_offset));
 	bpf_probe_read_user(&goid, sizeof(goid), (void *)(g_addr + CONFIG.goid_offset));
 	return goid;
+}
+
+// get_pid returns the pid (tgid) of the current task. The upper 32 bits of
+// bpf_get_current_pid_tgid() hold the thread-group id, i.e. the process id
+// that identifies a userspace process instance.
+static __always_inline
+	__u32
+	get_pid()
+{
+	return bpf_get_current_pid_tgid() >> 32;
 }
 
 // read register `reg` data from `ctx` into `regval`
@@ -266,6 +303,7 @@ static __always_inline void fetch_args(struct pt_regs *ctx, __u64 goid, __u64 ip
 
 	__builtin_memset(data, 0, sizeof(*data));
 	data->goid = goid;
+	data->pid = get_pid();
 
 	for (int i = 0; i < 8 && i < rules->length; i++)
 	{
@@ -273,10 +311,10 @@ static __always_inline void fetch_args(struct pt_regs *ctx, __u64 goid, __u64 ip
 		data->is_nil = 0;
 		switch (rules->rules[i].type)
 		{
-		case 0:
+		case ARG_RULE_REG:
 			fetch_args_from_reg(ctx, data, &rules->rules[i]);
 			break;
-		case 1:
+		case ARG_RULE_MEMORY:
 			fetch_args_from_memory(ctx, data, &rules->rules[i]);
 			break;
 		}
@@ -293,16 +331,21 @@ int ent(struct pt_regs *ctx)
 	__builtin_memset(e, 0, sizeof(*e));
 
 	e->goid = get_goid();
+	e->pid = get_pid();
 	e->ip = ctx->ip;
+	struct goid_key gkey = {
+		.pid = e->pid,
+		.goid = e->goid,
+	};
 	if (!bpf_map_lookup_elem(&should_trace_rip, &e->ip))
 	{
-		if (!bpf_map_lookup_elem(&should_trace_goid, &e->goid))
+		if (!bpf_map_lookup_elem(&should_trace_goid, &gkey))
 			return 0;
 	}
-	else if (!bpf_map_lookup_elem(&should_trace_goid, &e->goid))
+	else if (!bpf_map_lookup_elem(&should_trace_goid, &gkey))
 	{
 		__u64 should_trace = true;
-		bpf_map_update_elem(&should_trace_goid, &e->goid, &should_trace, BPF_ANY);
+		bpf_map_update_elem(&should_trace_goid, &gkey, &should_trace, BPF_ANY);
 	}
 
 	e->location = ENTPOINT;
@@ -333,7 +376,12 @@ int ret(struct pt_regs *ctx)
 	__builtin_memset(e, 0, sizeof(*e));
 
 	e->goid = get_goid();
-	if (!bpf_map_lookup_elem(&should_trace_goid, &e->goid))
+	e->pid = get_pid();
+	struct goid_key gkey = {
+		.pid = e->pid,
+		.goid = e->goid,
+	};
+	if (!bpf_map_lookup_elem(&should_trace_goid, &gkey))
 		return 0;
 
 	e->location = RETPOINT;
@@ -359,8 +407,13 @@ int goroutine_exit(struct pt_regs *ctx)
 	__builtin_memset(e, 0, sizeof(*e));
 
 	e->goid = get_goid();
+	e->pid = get_pid();
 	e->location = GOROUTINE_EXIT;
-	bpf_map_delete_elem(&should_trace_goid, &e->goid);
+	struct goid_key gkey = {
+		.pid = e->pid,
+		.goid = e->goid,
+	};
+	bpf_map_delete_elem(&should_trace_goid, &gkey);
 
 	return bpf_map_push_elem(&event_queue, e, BPF_EXIST);
 }
