@@ -37,6 +37,14 @@ go-ftrace 是一个基于Linux bpf(2) 的类似内核工具 ftrace(1) 的函数�
       --frets 'main.(*serviceMesh).send(Code=(+0(%ax)):s64, Detail.itab=(+8(%ax)):u64, Detail.data=(+16(%ax)):u64)'
   ```
 
+高频函数建议使用 cluster 模式，并设置 go-ftrace 的堆内存目标：
+
+```bash
+sudo ftrace -c --cluster-memory-limit-mb 256 -u 'main.hotPath' ./main
+```
+
+cluster 会按完整根调用采样，而不是独立丢弃入口/返回事件；它每秒依据实际 Go 堆占用动态调整采样率，并对未闭合事件、PID 数和返回值重频候选设置固定上限。摘要会显示主动跳过的根调用数、queue 丢失事件数和失效样本数；每项聚类结果同时显示实际观测值 `observed` 与量级估计值 `estimated`。估计值使用样本准入时的采样分母做逆概率加权；queue 丢失具有相关性，只单独报告而不强行加入估计，因此结果不应视为无损审计数据。该参数约束的是 go-ftrace 的 cluster 数据结构和采样目标，不等同于操作系统级 RSS/cgroup 硬限制。
+
 示例目录下同时提供了一个 `examples/Makefile`, 你也可以执行 `make <target>` 来快速执行对应的命令（对应上面示例）来进行测试.
 
 ps: 你可以在启动被测试程序 ./main 之前或者之后启动 ftrace，两种方式都可以正常工作，这主要是跟ebpf程序的加载、触发机制有关。

@@ -9,6 +9,11 @@
 #define RETPOINT 1
 #define GOROUTINE_EXIT 2
 
+#define TRACE_START 1
+#define TRACE_END 2
+#define TRACE_ABORT 4
+#define MAX_SAMPLE_EVENTS 4096
+
 // offset of `task_struct->thread_struct->fsbase`, `fsbase` contains the TLS
 // offset. On Linux register `FS` is used to load the TLS base address.
 #define fsbase_off (offsetof(struct task_struct, thread) + offsetof(struct thread_struct, fsbase))
@@ -25,7 +30,8 @@ struct config
 	__s64 goid_offset;
 	__s64 g_offset;
 	bool fetch_args;
-	__u8 padding[7];
+	bool adaptive_sampling;
+	__u8 padding[6];
 };
 
 // add volatile to avoid compiler optimization (cache data in register),
@@ -59,9 +65,11 @@ struct event
 	__u64 caller_bp;
 	__u64 time_ns;
 	__u32 pid;
+	__u32 sample_denominator;
 	__u8 location;
 	__u8 arg_count;
-	__u8 padding[2];
+	__u8 trace_flags;
+	__u8 padding;
 	struct arg_data args[8];
 };
 
@@ -116,6 +124,43 @@ struct goid_key
 	__u64 goid;
 };
 
+// denominator=1 means full collection; N>1 admits approximately one out of
+// every N wanted root calls. Userspace updates this array map at runtime.
+struct sample_config
+{
+	__u32 denominator;
+	__u32 _pad;
+};
+
+struct runtime_stats
+{
+	__u64 wanted_roots;
+	__u64 admitted_roots;
+	__u64 sampled_out_roots;
+	__u64 emitted_events;
+	__u64 dropped_events;
+	__u64 aborted_roots;
+	__u64 state_insert_failures;
+};
+
+// In adaptive mode a sampled goroutine is retained until the wanted root call
+// returns. root_depth keeps recursive calls of that same wanted function from
+// ending the sample prematurely.
+struct trace_state
+{
+	__u64 root_ip;
+	__u64 last_ip;
+	__u64 last_bp;
+	__u32 root_depth;
+	__u32 event_count;
+	__u32 sample_denominator;
+	__u32 _pad;
+};
+
+const struct sample_config *____ __attribute__((unused));
+const struct trace_state *_____ __attribute__((unused));
+const struct runtime_stats *______ __attribute__((unused));
+
 struct bpf_map_def SEC("maps") arg_rules_map = {
 	.type = BPF_MAP_TYPE_HASH,
 	.key_size = sizeof(__u64),
@@ -137,10 +182,24 @@ struct bpf_map_def SEC("maps") event_buffer = {
 	.max_entries = 1,
 };
 
+struct bpf_map_def SEC("maps") sample_config_map = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct sample_config),
+	.max_entries = 1,
+};
+
+struct bpf_map_def SEC("maps") runtime_stats_map = {
+	.type = BPF_MAP_TYPE_PERCPU_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(struct runtime_stats),
+	.max_entries = 1,
+};
+
 struct bpf_map_def SEC("maps") should_trace_goid = {
 	.type = BPF_MAP_TYPE_HASH,
 	.key_size = sizeof(struct goid_key),
-	.value_size = sizeof(bool),
+	.value_size = sizeof(struct trace_state),
 	.max_entries = 10000,
 };
 
@@ -148,6 +207,14 @@ struct bpf_map_def SEC("maps") should_trace_rip = {
 	.type = BPF_MAP_TYPE_HASH,
 	.key_size = sizeof(__u64),
 	.value_size = sizeof(bool),
+	.max_entries = 10000,
+};
+
+// Maps every RET probe of a wanted function to that function's entry IP.
+struct bpf_map_def SEC("maps") should_trace_ret = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(__u64),
+	.value_size = sizeof(__u64),
 	.max_entries = 10000,
 };
 
@@ -302,6 +369,40 @@ static __always_inline void fetch_args(struct pt_regs *ctx, struct event *e)
 	}
 }
 
+static __always_inline struct runtime_stats *get_runtime_stats()
+{
+	__u32 key = 0;
+	return bpf_map_lookup_elem(&runtime_stats_map, &key);
+}
+
+static __always_inline __u32 current_sample_denominator()
+{
+	__u32 key = 0;
+	struct sample_config *cfg = bpf_map_lookup_elem(&sample_config_map, &key);
+	if (!cfg || cfg->denominator <= 1)
+		return 1;
+	return cfg->denominator;
+}
+
+static __always_inline bool should_sample(__u32 denominator)
+{
+	return denominator <= 1 || bpf_get_prandom_u32() % denominator == 0;
+}
+
+static __always_inline int push_event(struct event *e)
+{
+	int result = bpf_map_push_elem(&event_queue, e, BPF_ANY);
+	struct runtime_stats *stats = get_runtime_stats();
+	if (stats)
+	{
+		if (result == 0)
+			stats->emitted_events++;
+		else
+			stats->dropped_events++;
+	}
+	return result;
+}
+
 SEC("uprobe/ent")
 int ent(struct pt_regs *ctx)
 {
@@ -314,25 +415,76 @@ int ent(struct pt_regs *ctx)
 	e->goid = get_goid();
 	e->pid = get_pid();
 	e->ip = ctx->ip;
+	e->bp = ctx->sp - 8;
+	e->caller_bp = ctx->bp;
 	struct goid_key gkey = {
 		.pid = e->pid,
 		.goid = e->goid,
 	};
-	if (!bpf_map_lookup_elem(&should_trace_rip, &e->ip))
+	bool wanted = bpf_map_lookup_elem(&should_trace_rip, &e->ip) != 0;
+	bool trace_abort = false;
+	struct trace_state *state = bpf_map_lookup_elem(&should_trace_goid, &gkey);
+	if (!state)
 	{
-		if (!bpf_map_lookup_elem(&should_trace_goid, &gkey))
+		if (!wanted)
 			return 0;
+		__u32 denominator = 1;
+		struct runtime_stats *stats = get_runtime_stats();
+		if (CONFIG.adaptive_sampling)
+		{
+			denominator = current_sample_denominator();
+			if (stats)
+				stats->wanted_roots++;
+			if (!should_sample(denominator))
+			{
+				if (stats)
+					stats->sampled_out_roots++;
+				return 0;
+			}
+		}
+		struct trace_state initial = {
+			.root_ip = e->ip,
+			.last_ip = e->ip,
+			.last_bp = e->bp,
+			.root_depth = 1,
+			.event_count = 1,
+			.sample_denominator = denominator,
+		};
+		if (bpf_map_update_elem(&should_trace_goid, &gkey, &initial, BPF_ANY) != 0)
+		{
+			if (stats)
+				stats->state_insert_failures++;
+			return 0;
+		}
+		e->sample_denominator = denominator;
+		if (CONFIG.adaptive_sampling)
+		{
+			if (stats)
+				stats->admitted_roots++;
+			e->trace_flags = TRACE_START;
+		}
 	}
-	else if (!bpf_map_lookup_elem(&should_trace_goid, &gkey))
+	else
 	{
-		__u64 should_trace = true;
-		bpf_map_update_elem(&should_trace_goid, &gkey, &should_trace, BPF_ANY);
+		e->sample_denominator = state->sample_denominator;
+		state->event_count++;
+		if (CONFIG.adaptive_sampling && state->event_count > MAX_SAMPLE_EVENTS)
+		{
+			e->trace_flags = TRACE_ABORT;
+			trace_abort = true;
+			struct runtime_stats *stats = get_runtime_stats();
+			if (stats)
+				stats->aborted_roots++;
+		}
+		bool duplicate = state->last_ip == e->ip && state->last_bp != e->caller_bp;
+		if (!trace_abort && CONFIG.adaptive_sampling && wanted && state->root_ip == e->ip && !duplicate)
+			state->root_depth++;
+		state->last_ip = e->ip;
+		state->last_bp = e->bp;
 	}
 
 	e->location = ENTPOINT;
 	e->time_ns = bpf_ktime_get_ns();
-	e->bp = ctx->sp - 8;
-	e->caller_bp = ctx->bp;
 
 	void *ra;
 	ra = (void *)ctx->sp;
@@ -343,8 +495,11 @@ int ent(struct pt_regs *ctx)
 
 	fetch_args(ctx, e);
 
-cont:
-	return bpf_map_push_elem(&event_queue, e, BPF_EXIST);
+cont:;
+	int push_result = push_event(e);
+	if (trace_abort)
+		bpf_map_delete_elem(&should_trace_goid, &gkey);
+	return push_result;
 }
 
 SEC("uprobe/ret")
@@ -362,20 +517,51 @@ int ret(struct pt_regs *ctx)
 		.pid = e->pid,
 		.goid = e->goid,
 	};
-	if (!bpf_map_lookup_elem(&should_trace_goid, &gkey))
+	struct trace_state *state = bpf_map_lookup_elem(&should_trace_goid, &gkey);
+	if (!state)
 		return 0;
+	e->sample_denominator = state->sample_denominator;
+	state->last_ip = 0;
 
 	e->location = RETPOINT;
 	e->ip = ctx->ip;
 	e->time_ns = bpf_ktime_get_ns();
+	bool trace_abort = false;
+	state->event_count++;
+	if (CONFIG.adaptive_sampling && state->event_count > MAX_SAMPLE_EVENTS)
+	{
+		e->trace_flags = TRACE_ABORT;
+		trace_abort = true;
+		struct runtime_stats *stats = get_runtime_stats();
+		if (stats)
+			stats->aborted_roots++;
+	}
 
 	if (!CONFIG.fetch_args)
 		goto cont;
 
 	fetch_args(ctx, e);
 
-cont:
-	return bpf_map_push_elem(&event_queue, e, BPF_EXIST);
+cont:;
+	bool trace_end = false;
+	if (!trace_abort && CONFIG.adaptive_sampling)
+	{
+		__u64 *root_ip = bpf_map_lookup_elem(&should_trace_ret, &e->ip);
+		if (root_ip && *root_ip == state->root_ip)
+		{
+			if (state->root_depth > 1)
+				state->root_depth--;
+			else
+			{
+				e->trace_flags = TRACE_END;
+				trace_end = true;
+			}
+		}
+	}
+	int push_result = push_event(e);
+	if (trace_end || trace_abort)
+		bpf_map_delete_elem(&should_trace_goid, &gkey);
+	return push_result;
 }
 
 SEC("uprobe/goroutine_exit")
@@ -394,7 +580,9 @@ int goroutine_exit(struct pt_regs *ctx)
 		.pid = e->pid,
 		.goid = e->goid,
 	};
+	if (!bpf_map_lookup_elem(&should_trace_goid, &gkey))
+		return 0;
 	bpf_map_delete_elem(&should_trace_goid, &gkey);
 
-	return bpf_map_push_elem(&event_queue, e, BPF_EXIST);
+	return push_event(e);
 }

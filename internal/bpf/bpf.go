@@ -2,8 +2,10 @@ package bpf
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -15,7 +17,7 @@ import (
 
 const (
 	EventDataOffset int64 = 436
-	VacantR10Offset       = -96
+	VacantR10Offset int64 = -96
 )
 
 var RegisterConstants = map[string]uint8{
@@ -38,28 +40,33 @@ var RegisterConstants = map[string]uint8{
 }
 
 type LoadOptions struct {
-	GoidOffset int64
-	GOffset    int64
+	GoidOffset       int64
+	GOffset          int64
+	AdaptiveSampling bool
 }
 
 type BPF struct {
-	objs    *GoftraceObjects
-	closers []io.Closer
+	objs      *GoftraceObjects
+	closers   []io.Closer
+	linksOnce sync.Once
+	closeOnce sync.Once
 }
 
 func New() *BPF {
 	return &BPF{}
 }
 
-func (b *BPF) BpfConfig(fetchArgs bool, goidOffset, gOffset int64) interface{} {
+func (b *BPF) BpfConfig(fetchArgs, adaptiveSampling bool, goidOffset, gOffset int64) interface{} {
 	return struct {
 		GoidOffset, GOffset int64
 		FetchArgs           bool
-		Padding             [7]byte
+		AdaptiveSampling    bool
+		Padding             [6]byte
 	}{
-		GoidOffset: goidOffset,
-		GOffset:    gOffset,
-		FetchArgs:  fetchArgs,
+		GoidOffset:       goidOffset,
+		GOffset:          gOffset,
+		FetchArgs:        fetchArgs,
+		AdaptiveSampling: adaptiveSampling,
 	}
 }
 
@@ -70,13 +77,6 @@ func (b *BPF) Load(uprobes []uprobe.Uprobe, opts LoadOptions) (err error) {
 	}
 
 	b.objs = &GoftraceObjects{}
-	defer func() {
-		if err != nil {
-			return
-		}
-		b.closers = append(b.closers, b.objs.EventQueue)
-		b.closers = append(b.closers, b.objs.EventBuffer)
-	}()
 
 	fetchArgs := false
 	for _, uprobe := range uprobes {
@@ -85,7 +85,7 @@ func (b *BPF) Load(uprobes []uprobe.Uprobe, opts LoadOptions) (err error) {
 			break
 		}
 	}
-	cfg := b.BpfConfig(fetchArgs, opts.GoidOffset, opts.GOffset)
+	cfg := b.BpfConfig(fetchArgs, opts.AdaptiveSampling, opts.GoidOffset, opts.GOffset)
 	if err = spec.RewriteConstants(map[string]interface{}{"CONFIG": cfg}); err != nil {
 		return
 	}
@@ -94,15 +94,30 @@ func (b *BPF) Load(uprobes []uprobe.Uprobe, opts LoadOptions) (err error) {
 	}); err != nil {
 		return
 	}
+	defer func() {
+		if err != nil {
+			b.objs.Close()
+			b.objs = nil
+		}
+	}()
 
-	for _, uprobe := range uprobes {
-		if len(uprobe.FetchArgs) > 0 {
-			if err = b.setArgRules(uprobe.Address, uprobe.FetchArgs); err != nil {
+	wantedEntries := make(map[string]uint64)
+	for _, probe := range uprobes {
+		if probe.Wanted && probe.Location == uprobe.AtEntry {
+			wantedEntries[probe.Funcname] = probe.Address
+			if err = b.setWanted(probe); err != nil {
 				return
 			}
 		}
-		if uprobe.Wanted {
-			if err = b.setWanted(uprobe); err != nil {
+	}
+	for _, probe := range uprobes {
+		if len(probe.FetchArgs) > 0 {
+			if err = b.setArgRules(probe.Address, probe.FetchArgs); err != nil {
+				return
+			}
+		}
+		if opts.AdaptiveSampling && probe.Wanted && probe.Location == uprobe.AtRet {
+			if err = b.setWantedRet(probe.Address, wantedEntries[probe.Funcname]); err != nil {
 				return
 			}
 		}
@@ -149,6 +164,51 @@ func (b *BPF) setWanted(uprobe uprobe.Uprobe) (err error) {
 	return b.objs.ShouldTraceRip.Update(uprobe.Address, true, ebpf.UpdateNoExist)
 }
 
+func (b *BPF) setWantedRet(retAddress, entryAddress uint64) error {
+	return b.objs.ShouldTraceRet.Update(retAddress, entryAddress, ebpf.UpdateNoExist)
+}
+
+// SetSampleDenominator updates the cluster-mode sampling probability. A value
+// of N admits approximately one out of every N wanted root calls.
+func (b *BPF) SetSampleDenominator(denominator uint32) error {
+	if denominator == 0 {
+		denominator = 1
+	}
+	key := uint32(0)
+	cfg := GoftraceSampleConfig{Denominator: denominator}
+	return b.objs.SampleConfigMap.Update(key, cfg, ebpf.UpdateAny)
+}
+
+type RuntimeStats struct {
+	WantedRoots         uint64
+	AdmittedRoots       uint64
+	SampledOutRoots     uint64
+	EmittedEvents       uint64
+	DroppedEvents       uint64
+	AbortedRoots        uint64
+	StateInsertFailures uint64
+}
+
+func (b *BPF) ReadRuntimeStats() (RuntimeStats, error) {
+	var values []GoftraceRuntimeStats
+	key := uint32(0)
+	if err := b.objs.RuntimeStatsMap.Lookup(key, &values); err != nil {
+		return RuntimeStats{}, err
+	}
+
+	var total RuntimeStats
+	for _, value := range values {
+		total.WantedRoots += value.WantedRoots
+		total.AdmittedRoots += value.AdmittedRoots
+		total.SampledOutRoots += value.SampledOutRoots
+		total.EmittedEvents += value.EmittedEvents
+		total.DroppedEvents += value.DroppedEvents
+		total.AbortedRoots += value.AbortedRoots
+		total.StateInsertFailures += value.StateInsertFailures
+	}
+	return total, nil
+}
+
 func (b *BPF) Attach(bin string, uprobes []uprobe.Uprobe) (err error) {
 	ex, err := link.OpenExecutable(bin)
 	if err != nil {
@@ -175,36 +235,82 @@ func (b *BPF) Attach(bin string, uprobes []uprobe.Uprobe) (err error) {
 	return
 }
 
-func (b *BPF) Detach() {
-	log.Info("start detaching\n")
-	sem := semaphore.NewWeighted(10)
-	for i, closer := range b.closers {
-		fmt.Printf("detaching %d/%d\r", i+1, len(b.closers))
-		sem.Acquire(context.Background(), 1)
-		go func(closer io.Closer) {
-			defer sem.Release(1)
-			closer.Close()
-		}(closer)
-	}
-	fmt.Println()
+func (b *BPF) StopTracing() {
+	b.linksOnce.Do(func() {
+		log.Info("start detaching\n")
+		sem := semaphore.NewWeighted(10)
+		for i, closer := range b.closers {
+			fmt.Printf("detaching %d/%d\r", i+1, len(b.closers))
+			_ = sem.Acquire(context.Background(), 1)
+			go func(closer io.Closer) {
+				defer sem.Release(1)
+				_ = closer.Close()
+			}(closer)
+		}
+		_ = sem.Acquire(context.Background(), 10)
+		sem.Release(10)
+		fmt.Println()
+	})
 }
 
-func (b *BPF) PollEvents(ctx context.Context) chan GoftraceEvent {
-	ch := make(chan GoftraceEvent)
+func (b *BPF) Detach() {
+	b.closeOnce.Do(func() {
+		b.StopTracing()
+		if b.objs != nil {
+			_ = b.objs.Close()
+			b.objs = nil
+		}
+	})
+}
+
+type PollResult struct {
+	Event GoftraceEvent
+	Err   error
+}
+
+func (b *BPF) PollEvents(ctx context.Context) <-chan PollResult {
+	ch := make(chan PollResult)
 
 	go func() {
 		defer close(ch)
+		idleTicker := time.NewTicker(time.Millisecond)
+		defer idleTicker.Stop()
+		draining := false
 		for {
+			if !draining {
+				select {
+				case <-ctx.Done():
+					draining = true
+				default:
+				}
+			}
+
 			event := GoftraceEvent{}
+			if err := b.objs.EventQueue.LookupAndDelete(nil, &event); err != nil {
+				if !errors.Is(err, ebpf.ErrKeyNotExist) {
+					ch <- PollResult{Err: err}
+					return
+				}
+				if draining {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					draining = true
+				case <-idleTicker.C:
+				}
+				continue
+			}
+
+			if draining {
+				ch <- PollResult{Event: event}
+				continue
+			}
 			select {
 			case <-ctx.Done():
-				return
-			default:
-				if err := b.objs.EventQueue.LookupAndDelete(nil, &event); err != nil {
-					time.Sleep(time.Millisecond)
-					continue
-				}
-				ch <- event
+				draining = true
+				ch <- PollResult{Event: event}
+			case ch <- PollResult{Event: event}:
 			}
 		}
 	}()

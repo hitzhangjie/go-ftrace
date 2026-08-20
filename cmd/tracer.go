@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"time"
 
@@ -26,16 +27,17 @@ type Tracer struct {
 }
 
 type Config struct {
-	excludeVendor   bool
-	uprobeWildcards []string
-	fargs           []string
-	frets           []string
-	drilldown       string
-	trimprefix      string
-	autoFetchArgs   bool
-	autoFetchRets   bool
-	cluster         bool
-	clusterInterval time.Duration
+	excludeVendor        bool
+	uprobeWildcards      []string
+	fargs                []string
+	frets                []string
+	drilldown            string
+	trimprefix           string
+	autoFetchArgs        bool
+	autoFetchRets        bool
+	cluster              bool
+	clusterInterval      time.Duration
+	clusterMemoryLimitMB uint64
 }
 
 // NewTracer create a new tracer for ELF executable `bin`, it attach uprobes listed in `uprobeWildcards`,
@@ -46,6 +48,12 @@ type Config struct {
 func NewTracer(bin string, cfg *Config) (_ *Tracer, err error) {
 	if cfg == nil {
 		return nil, errors.New("invalid config: cfg is nil")
+	}
+	if cfg.cluster && cfg.clusterMemoryLimitMB == 0 {
+		return nil, errors.New("invalid config: cluster memory limit must be greater than zero")
+	}
+	if cfg.clusterMemoryLimitMB > ^uint64(0)>>20 {
+		return nil, errors.New("invalid config: cluster memory limit is too large")
 	}
 	elf, err := elf.New(bin)
 	if err != nil {
@@ -158,6 +166,12 @@ func parseFetchExpr(s string) (funcname string, vars []uprobe.FetchArgExpr, err 
 
 // Start start tracing
 func (t *Tracer) Start() (err error) {
+	clusterMemoryLimit := t.cfg.clusterMemoryLimitMB << 20
+	var sampler *adaptiveSampler
+	if t.cfg.cluster {
+		sampler = newAdaptiveSampler(clusterMemoryLimit)
+	}
+
 	funcs, fetchArgs, retFetchArgs, err := t.Parse()
 	if err != nil {
 		return
@@ -205,57 +219,114 @@ requireConfirm:
 
 	// load bpf programme and setup bpf programme config
 	if err = t.bpf.Load(uprobes, bpf.LoadOptions{
-		GoidOffset: goidOffset,
-		GOffset:    gOffset,
+		GoidOffset:       goidOffset,
+		GOffset:          gOffset,
+		AdaptiveSampling: t.cfg.cluster,
 	}); err != nil {
 		return
 	}
+	defer t.bpf.Detach()
 
 	// attach uprobes (and detach when exit)
+	if t.cfg.cluster {
+		var memory runtime.MemStats
+		runtime.ReadMemStats(&memory)
+		denominator, _ := sampler.adjust(memory.HeapAlloc)
+		if err = t.bpf.SetSampleDenominator(denominator); err != nil {
+			return fmt.Errorf("initialize cluster sampling: %w", err)
+		}
+		log.Infof("cluster memory target=%d MiB, initial sampling=1/%d", t.cfg.clusterMemoryLimitMB, denominator)
+	}
 	if err = t.bpf.Attach(t.bin, uprobes); err != nil {
 		return
 	}
 
-	defer t.bpf.Detach()
 	log.Info("start tracing\n")
 
-	// exit when receive SIGINT
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	// Stop probe production first on SIGINT, then drain all events already in
+	// the queue before reading final loss counters and printing the summary.
+	signalCtx, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopSignal()
+	pollCtx, stopPolling := context.WithCancel(context.Background())
+	defer stopPolling()
+	signalCh := signalCtx.Done()
 
 	// create eventmanager to poll events, prepare the callstack and print
 	mgr, err := eventmanager.New(uprobes, t.elf,
 		t.cfg.drilldown,
 		t.cfg.trimprefix,
-		t.cfg.cluster)
+		t.cfg.cluster,
+		clusterMemoryLimit)
 	if err != nil {
 		return
 	}
 
 	// 聚类模式下按固定周期打印中间汇总（累计统计，不重置），
 	// 避免长时间运行时只能靠 Ctrl+C 才能看到结果。
-	var tickerCh <-chan time.Time
+	var summaryCh <-chan time.Time
 	if t.cfg.cluster && t.cfg.clusterInterval > 0 {
 		ticker := time.NewTicker(t.cfg.clusterInterval)
-		tickerCh = ticker.C
+		summaryCh = ticker.C
 		defer ticker.Stop()
 	}
+
+	var samplingCh <-chan time.Time
+	if t.cfg.cluster {
+		ticker := time.NewTicker(time.Second)
+		samplingCh = ticker.C
+		defer ticker.Stop()
+	}
+
+	// PollEvents must be called exactly once. Calling it in the select expression
+	// would create and strand a new goroutine and channel on every loop iteration.
+	events := t.bpf.PollEvents(pollCtx)
 
 	// 轮询并处理事件，更新统计并周期性打印
 loop:
 	for {
 		select {
-		case event, ok := <-t.bpf.PollEvents(ctx):
+		case <-signalCh:
+			t.bpf.StopTracing()
+			stopPolling()
+			signalCh = nil
+			summaryCh = nil
+			samplingCh = nil
+		case result, ok := <-events:
 			if !ok {
 				break loop
 			}
-			if err = mgr.Handle(event); err != nil {
+			if result.Err != nil {
+				return fmt.Errorf("poll BPF events: %w", result.Err)
+			}
+			if err = mgr.Handle(result.Event); err != nil {
 				return
 			}
-		case <-tickerCh:
-			fmt.Printf("\n[%s] periodic cluster summary (cumulative)\n", time.Now().Format("15:04:05"))
-			mgr.PrintClusterSummary()
+		case <-summaryCh:
+			stats, statsErr := t.bpf.ReadRuntimeStats()
+			if statsErr != nil {
+				return fmt.Errorf("read cluster runtime stats: %w", statsErr)
+			}
+			fmt.Printf("\n[%s] periodic cluster summary (cumulative, sampling=1/%d)\n", time.Now().Format("15:04:05"), sampler.denominator)
+			mgr.PrintClusterSummary(stats)
+		case <-samplingCh:
+			var memory runtime.MemStats
+			runtime.ReadMemStats(&memory)
+			denominator, changed := sampler.adjust(memory.HeapAlloc)
+			if !changed {
+				continue
+			}
+			if err = t.bpf.SetSampleDenominator(denominator); err != nil {
+				return fmt.Errorf("update cluster sampling: %w", err)
+			}
+			log.Warnf("cluster heap=%d MiB target=%d MiB, sampling adjusted to 1/%d", memory.HeapAlloc>>20, t.cfg.clusterMemoryLimitMB, denominator)
 		}
 	}
-	return mgr.PrintRemaining()
+	var stats bpf.RuntimeStats
+	if t.cfg.cluster {
+		stats, err = t.bpf.ReadRuntimeStats()
+		if err != nil {
+			return fmt.Errorf("read final cluster runtime stats: %w", err)
+		}
+	}
+	return mgr.PrintRemaining(stats)
 }

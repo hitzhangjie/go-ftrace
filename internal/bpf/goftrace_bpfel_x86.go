@@ -38,17 +38,45 @@ type GoftraceArgRules struct {
 }
 
 type GoftraceEvent struct {
-	Goid     uint64
-	Ip       uint64
-	Bp       uint64
-	CallerIp uint64
-	CallerBp uint64
-	TimeNs   uint64
-	Pid      uint32
-	Location uint8
-	ArgCount uint8
-	Padding  [2]uint8
-	Args     [8]GoftraceArgData
+	Goid              uint64
+	Ip                uint64
+	Bp                uint64
+	CallerIp          uint64
+	CallerBp          uint64
+	TimeNs            uint64
+	Pid               uint32
+	SampleDenominator uint32
+	Location          uint8
+	ArgCount          uint8
+	TraceFlags        uint8
+	Padding           uint8
+	Args              [8]GoftraceArgData
+	_                 [4]byte
+}
+
+type GoftraceRuntimeStats struct {
+	WantedRoots         uint64
+	AdmittedRoots       uint64
+	SampledOutRoots     uint64
+	EmittedEvents       uint64
+	DroppedEvents       uint64
+	AbortedRoots        uint64
+	StateInsertFailures uint64
+}
+
+type GoftraceSampleConfig struct {
+	Denominator uint32
+	Pad         uint32
+}
+
+type GoftraceTraceState struct {
+	RootIp            uint64
+	LastIp            uint64
+	LastBp            uint64
+	RootDepth         uint32
+	EventCount        uint32
+	SampleDenominator uint32
+	Pad               uint32
 }
 
 // LoadGoftrace returns the embedded CollectionSpec for Goftrace.
@@ -104,7 +132,10 @@ type GoftraceMapSpecs struct {
 	ArgRulesMap     *ebpf.MapSpec `ebpf:"arg_rules_map"`
 	EventBuffer     *ebpf.MapSpec `ebpf:"event_buffer"`
 	EventQueue      *ebpf.MapSpec `ebpf:"event_queue"`
+	RuntimeStatsMap *ebpf.MapSpec `ebpf:"runtime_stats_map"`
+	SampleConfigMap *ebpf.MapSpec `ebpf:"sample_config_map"`
 	ShouldTraceGoid *ebpf.MapSpec `ebpf:"should_trace_goid"`
+	ShouldTraceRet  *ebpf.MapSpec `ebpf:"should_trace_ret"`
 	ShouldTraceRip  *ebpf.MapSpec `ebpf:"should_trace_rip"`
 }
 
@@ -130,7 +161,10 @@ type GoftraceMaps struct {
 	ArgRulesMap     *ebpf.Map `ebpf:"arg_rules_map"`
 	EventBuffer     *ebpf.Map `ebpf:"event_buffer"`
 	EventQueue      *ebpf.Map `ebpf:"event_queue"`
+	RuntimeStatsMap *ebpf.Map `ebpf:"runtime_stats_map"`
+	SampleConfigMap *ebpf.Map `ebpf:"sample_config_map"`
 	ShouldTraceGoid *ebpf.Map `ebpf:"should_trace_goid"`
+	ShouldTraceRet  *ebpf.Map `ebpf:"should_trace_ret"`
 	ShouldTraceRip  *ebpf.Map `ebpf:"should_trace_rip"`
 }
 
@@ -139,7 +173,10 @@ func (m *GoftraceMaps) Close() error {
 		m.ArgRulesMap,
 		m.EventBuffer,
 		m.EventQueue,
+		m.RuntimeStatsMap,
+		m.SampleConfigMap,
 		m.ShouldTraceGoid,
+		m.ShouldTraceRet,
 		m.ShouldTraceRip,
 	)
 }

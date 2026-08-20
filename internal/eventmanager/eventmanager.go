@@ -17,6 +17,16 @@ const (
 	eventLocationEntry         uint8 = 0 // function entry
 	eventLocationRet           uint8 = 1 // function return
 	eventLocationGoroutineExit uint8 = 2 // goroutine exit
+
+	traceFlagStart uint8 = 1
+	traceFlagEnd   uint8 = 2
+	traceFlagAbort uint8 = 4
+
+	maxClusterPIDs        = 64
+	maxClusterRetvals     = 64
+	maxClusterSuppressed  = 10000
+	estimatedEventBytes   = 2048
+	clusterEventBudgetDiv = 4
 )
 
 // Event represents a func enter/ret event, see ftrace.c event
@@ -24,6 +34,11 @@ type Event struct {
 	bpf.GoftraceEvent
 	uprobe    *uprobe.Uprobe
 	argString string
+}
+
+type traceKey struct {
+	pid  uint32
+	goid uint64
 }
 
 // EventManager manages events
@@ -41,6 +56,13 @@ type EventManager struct {
 	// never collide across processes.
 	pidMu sync.RWMutex
 	pids  map[uint32]*pidState
+	seq   uint64
+
+	maxPendingEvents uint64
+	pendingEvents    uint64
+	droppedStacks    uint64
+	evictedPIDs      uint64
+	suppressed       map[traceKey]struct{}
 
 	bootTime time.Time
 }
@@ -51,18 +73,21 @@ type EventManager struct {
 // instead of a flat (pid, goid) composite key.
 type pidState struct {
 	goEvents     map[uint64][]Event // k=goid,v=[]event
-	goEventStack map[uint64]uint64
+	goEventStack map[uint64][]uint64
+	invalid      map[uint64]bool
+	lastSeen     uint64
 
 	// agg holds per-function clustering statistics keyed by function name.
-	// Clustering is scoped per-pid so that the summary never mixes the
-	// latency/return-value distributions of different process instances.
+	// Clustering is scoped per-pid so concurrently running processes do not
+	// mix latency/return-value distributions. PID reuse remains a known boundary.
 	agg map[string]*funcAgg
 }
 
 func newPidState() *pidState {
 	return &pidState{
 		goEvents:     map[uint64][]Event{},
-		goEventStack: map[uint64]uint64{},
+		goEventStack: map[uint64][]uint64{},
+		invalid:      map[uint64]bool{},
 		agg:          map[string]*funcAgg{},
 	}
 }
@@ -70,20 +95,53 @@ func newPidState() *pidState {
 // pidState returns the per-process state for pid, creating it lazily on first
 // use. It is safe for concurrent use from both the arg-dispatch goroutine and
 // the event-handling goroutine.
-func (m *EventManager) pidState(pid uint32) *pidState {
+func (m *EventManager) existingPidState(pid uint32) *pidState {
 	m.pidMu.RLock()
-	s := m.pids[pid]
-	m.pidMu.RUnlock()
-	if s != nil {
+	defer m.pidMu.RUnlock()
+	return m.pids[pid]
+}
+
+func (m *EventManager) pidState(pid uint32) *pidState {
+	m.pidMu.Lock()
+	defer m.pidMu.Unlock()
+
+	m.seq++
+	if s := m.pids[pid]; s != nil {
+		s.lastSeen = m.seq
 		return s
 	}
 
-	m.pidMu.Lock()
-	defer m.pidMu.Unlock()
-	if s = m.pids[pid]; s == nil {
-		s = newPidState()
-		m.pids[pid] = s
+	if m.cluster && len(m.pids) >= maxClusterPIDs {
+		var oldestPID uint32
+		var oldest *pidState
+		for candidatePID, candidate := range m.pids {
+			if oldest == nil || candidate.lastSeen < oldest.lastSeen {
+				oldestPID, oldest = candidatePID, candidate
+			}
+		}
+		if oldest != nil {
+			var released uint64
+			for _, events := range oldest.goEvents {
+				released += uint64(len(events))
+			}
+			if released >= m.pendingEvents {
+				m.pendingEvents = 0
+			} else {
+				m.pendingEvents -= released
+			}
+			delete(m.pids, oldestPID)
+			for key := range m.suppressed {
+				if key.pid == oldestPID {
+					delete(m.suppressed, key)
+				}
+			}
+			m.evictedPIDs++
+		}
 	}
+
+	s := newPidState()
+	s.lastSeen = m.seq
+	m.pids[pid] = s
 	return s
 }
 
@@ -118,21 +176,30 @@ var latencyBuckets = []struct {
 }
 
 // funcAgg accumulates clustering statistics for a single traced function.
+type retvalCount struct {
+	count         uint64
+	weightedCount uint64
+	weightedError uint64
+}
+
 type funcAgg struct {
-	calls     uint64
-	latencies []uint64 // len(latencyBuckets)+1, last element is the overflow bucket
-	retvals   map[string]uint64
+	calls             uint64
+	weightedCalls     uint64
+	latencies         []uint64 // len(latencyBuckets)+1, last element is the overflow bucket
+	weightedLatencies []uint64
+	retvals           map[string]retvalCount
 }
 
 func newFuncAgg() *funcAgg {
 	return &funcAgg{
-		latencies: make([]uint64, len(latencyBuckets)+1),
-		retvals:   map[string]uint64{},
+		latencies:         make([]uint64, len(latencyBuckets)+1),
+		weightedLatencies: make([]uint64, len(latencyBuckets)+1),
+		retvals:           map[string]retvalCount{},
 	}
 }
 
 // New create a new EventManager, which receives events via `ch`
-func New(uprobes []uprobe.Uprobe, elf *elf.ELF, drilldown, trimprefix string, cluster bool) (_ *EventManager, err error) {
+func New(uprobes []uprobe.Uprobe, elf *elf.ELF, drilldown, trimprefix string, cluster bool, clusterMemoryLimit uint64) (_ *EventManager, err error) {
 	host, err := sysinfo.Host()
 	if err != nil {
 		return
@@ -149,7 +216,14 @@ func New(uprobes []uprobe.Uprobe, elf *elf.ELF, drilldown, trimprefix string, cl
 		trimprefix: trimprefix,
 		cluster:    cluster,
 		pids:       map[uint32]*pidState{},
+		suppressed: map[traceKey]struct{}{},
 		bootTime:   bootTime,
+	}
+	if cluster {
+		m.maxPendingEvents = clusterMemoryLimit / clusterEventBudgetDiv / estimatedEventBytes
+		if m.maxPendingEvents == 0 {
+			m.maxPendingEvents = 1
+		}
 	}
 	return m, err
 }

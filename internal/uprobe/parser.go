@@ -158,6 +158,7 @@ func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
 				RelOffset: retOffset - entOffset,
 				FetchArgs: retFetchArgs[funcname],
 				Values:    retValues[funcname],
+				Wanted:    wanted,
 			})
 		}
 		fmt.Fprintf(message, "]")

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/hitzhangjie/go-ftrace/internal/bpf"
 	"github.com/hitzhangjie/go-ftrace/internal/uprobe"
 )
 
@@ -111,16 +112,18 @@ func (m *EventManager) SprintArg(arg *uprobe.FetchArg, data []uint8) (_ string, 
 	return fmt.Sprintf("__call__=%s", syms[0].Name), nil
 }
 
-func (m *EventManager) PrintRemaining() (err error) {
+func (m *EventManager) PrintRemaining(stats bpf.RuntimeStats) (err error) {
 	pids := m.snapshotPids()
 	if m.cluster {
-		// 收尾时把尚未闭合的栈也聚合进去，再输出聚类汇总。
+		// Only complete root calls are valid samples. Incomplete stacks can be
+		// caused by queue overwrite or shutdown and must not bias aggregation.
 		for pid, s := range pids {
 			for goid := range s.goEvents {
-				m.ClusterStack(pid, goid)
+				m.droppedStacks++
+				m.dropStack(pid, goid)
 			}
 		}
-		m.PrintClusterSummary()
+		m.PrintClusterSummary(stats)
 		return nil
 	}
 	for pid, s := range pids {
@@ -133,13 +136,41 @@ func (m *EventManager) PrintRemaining() (err error) {
 	return
 }
 
+func samplingEstimate(weighted uint64) float64 {
+	return float64(weighted)
+}
+
+func printRuntimeStats(stats bpf.RuntimeStats) {
+	sampledOutRate := 0.0
+	if stats.WantedRoots > 0 {
+		sampledOutRate = float64(stats.SampledOutRoots) * 100 / float64(stats.WantedRoots)
+	}
+	eventLossRate := 0.0
+	if stats.DroppedEvents > 0 {
+		eventLossRate = 100 / (1 + float64(stats.EmittedEvents)/float64(stats.DroppedEvents))
+	}
+
+	fmt.Printf("sampling: wanted roots=%d, admitted=%d, sampled out=%d (%.2f%%), state insert failures=%d\n",
+		stats.WantedRoots, stats.AdmittedRoots, stats.SampledOutRoots, sampledOutRate, stats.StateInsertFailures)
+	fmt.Printf("events: emitted=%d, dropped=%d (%.2f%%), aborted roots=%d\n",
+		stats.EmittedEvents, stats.DroppedEvents, eventLossRate, stats.AbortedRoots)
+	fmt.Println("estimate: inverse root-sampling weights only; queue event loss and invalid/memory-discarded stacks are reported but not extrapolated")
+}
+
 // PrintClusterSummary prints the aggregated per-function latency distribution
 // and top-10 return-value frequency distribution.
-func (m *EventManager) PrintClusterSummary() {
+func (m *EventManager) PrintClusterSummary(stats bpf.RuntimeStats) {
 	pids := m.snapshotPids()
 
 	fmt.Println()
 	fmt.Println("==================== function latency & return-value summary ====================")
+	printRuntimeStats(stats)
+	if m.droppedStacks > 0 {
+		fmt.Printf("samples: discarded=%d (incomplete, aborted, or over memory budget)\n", m.droppedStacks)
+	}
+	if m.evictedPIDs > 0 {
+		fmt.Printf("memory guard: evicted %d least-recently-used PID summaries\n", m.evictedPIDs)
+	}
 
 	// Sort pids for deterministic output. When only a single process is
 	// traced, keep the previous compact format (no pid section headers).
@@ -172,27 +203,27 @@ func (m *EventManager) printClusterSummary(agg map[string]*funcAgg) {
 
 	for _, fn := range funcs {
 		a := agg[fn]
-		fmt.Printf("\n%s  (calls=%d)\n", fn, a.calls)
+		fmt.Printf("\n%s  (calls observed=%d, estimated≈%.0f)\n", fn, a.calls, samplingEstimate(a.weightedCalls))
 
-		fmt.Println("  latency distribution:")
+		fmt.Println("  latency distribution (observed, estimated):")
 		for i, b := range latencyBuckets {
-			fmt.Printf("    %-10s %d\n", b.label, a.latencies[i])
+			fmt.Printf("    %-10s %d, ≈%.0f\n", b.label, a.latencies[i], samplingEstimate(a.weightedLatencies[i]))
 		}
 		overflow := ">" + latencyBuckets[len(latencyBuckets)-1].edge.String()
-		fmt.Printf("    %-10s %d\n", overflow, a.latencies[len(latencyBuckets)])
+		fmt.Printf("    %-10s %d, ≈%.0f\n", overflow, a.latencies[len(latencyBuckets)], samplingEstimate(a.weightedLatencies[len(latencyBuckets)]))
 
 		if len(a.retvals) > 0 {
 			type kv struct {
-				v string
-				n uint64
+				v     string
+				count retvalCount
 			}
 			kvs := make([]kv, 0, len(a.retvals))
-			for v, n := range a.retvals {
-				kvs = append(kvs, kv{v, n})
+			for v, count := range a.retvals {
+				kvs = append(kvs, kv{v: v, count: count})
 			}
 			sort.Slice(kvs, func(i, j int) bool {
-				if kvs[i].n != kvs[j].n {
-					return kvs[i].n > kvs[j].n
+				if kvs[i].count.weightedCount != kvs[j].count.weightedCount {
+					return kvs[i].count.weightedCount > kvs[j].count.weightedCount
 				}
 				return kvs[i].v < kvs[j].v
 			})
@@ -200,9 +231,14 @@ func (m *EventManager) printClusterSummary(agg map[string]*funcAgg) {
 			if len(top) > 10 {
 				top = top[:10]
 			}
-			fmt.Printf("  return values (top %d of %d distinct):\n", len(top), len(a.retvals))
+			fmt.Printf("  return values (top %d; observed, estimated):\n", len(top))
 			for _, e := range top {
-				fmt.Printf("    %-40s %d\n", e.v, e.n)
+				estimated := samplingEstimate(e.count.weightedCount)
+				if e.count.weightedError == 0 {
+					fmt.Printf("    %-40s %d, ≈%.0f\n", e.v, e.count.count, estimated)
+				} else {
+					fmt.Printf("    %-40s >=%d, ≈%.0f (estimated error <= %.0f)\n", e.v, e.count.count, estimated, samplingEstimate(e.count.weightedError))
+				}
 			}
 		}
 	}

@@ -72,7 +72,7 @@ flowchart LR
         EXIT["uprobe/goroutine_exit"]
         STATE["should_trace_rip\nshould_trace_goid"]
         RULES["arg_rules_map"]
-        QUEUES["event_queue\narg_queue"]
+        QUEUES["event_queue\n完整 event+args"]
 
         ENT <--> STATE
         RET <--> STATE
@@ -114,8 +114,9 @@ flowchart LR
 | `-R, --frets-auto` | 默认开启；自动推导返回值规则 |
 | `-D, --drilldown` | 仅打印根函数名与指定值相同的闭合调用栈 |
 | `-P, --trimprefix` | 去掉输出源码路径的公共前缀 |
-| `-c, --cluster` | 不逐条打印，改为聚合函数耗时和返回值 |
+| `-c, --cluster` | 不逐条打印，改为聚合函数耗时和返回值，并启用动态采样与有界内存保护 |
 | `--cluster-interval` | 聚合结果的周期输出间隔，默认 `5s`；设为 0 时只在退出时输出 |
+| `--cluster-memory-limit-mb` | cluster 模式 Go 堆目标，默认 `256` MiB；用于自适应采样和未闭合事件硬上限 |
 
 显式出现 `--fargs` 时，入口参数的自动推导会整体关闭；显式出现 `--frets` 时，返回值自动推导会整体关闭。两类开关相互独立。
 
@@ -318,26 +319,29 @@ bpf_get_current_task()
 | map | 类型 | key/value | 用途 |
 | --- | --- | --- | --- |
 | `should_trace_rip` | HASH | 入口 IP → bool | 用户态写入的静态 wanted 触发点集合 |
-| `should_trace_goid` | HASH | `(pid, goid)` → bool | 内核态动态维护的已触发 goroutine 集合 |
+| `should_trace_ret` | HASH | wanted RET IP → 函数入口 IP | 标识 cluster 样本的根调用返回边界 |
+| `should_trace_goid` | HASH | `(pid, goid)` → `trace_state` | 内核态动态维护的已采样根调用状态 |
+| `sample_config_map` | ARRAY | 固定 key 0 → 采样分母 | 用户态运行中动态写入，`N` 表示约采 `1/N` 个 wanted 根调用 |
+| `runtime_stats_map` | PERCPU_ARRAY | 固定 key 0 → 运行统计 | 统计 wanted/admitted/sampled-out roots、状态插入失败，以及成功/失败投递的事件数和中止样本数 |
 | `arg_rules_map` | HASH | probe IP → `arg_rules` | 入口参数及返回值抓取规则 |
-| `event_stack` | PERCPU_ARRAY | 固定 key 0 → `event` | 每 CPU 的事件组装暂存区，避免占用过多 BPF 栈 |
-| `arg_stack` | PERCPU_ARRAY | 固定 key 0 → `arg_data` | 每 CPU 的参数组装暂存区 |
-| `event_queue` | QUEUE | `event` | 向用户态传递入口、返回和 goroutine 退出事件 |
-| `arg_queue` | QUEUE | `arg_data` | 向用户态传递参数和返回值数据 |
+| `event_buffer` | PERCPU_ARRAY | 固定 key 0 → 完整 `event` | 每 CPU 的事件组装暂存区，避免占用过多 BPF 栈 |
+| `event_queue` | QUEUE | 完整 `event` | 原子传递事件头及最多 8 个参数叶子 |
 
-`should_trace_rip` 在启动阶段由用户态根据 `Uprobe.Wanted` 写入，运行时只读；`should_trace_goid` 完全由 eBPF 在运行时增删。两张表的生命周期和职责不能混淆。
+`should_trace_rip`、`should_trace_ret` 在启动阶段由用户态写入，运行时只读；`should_trace_goid` 由 eBPF 在运行时增删；`sample_config_map` 则由用户态闭环控制器动态更新。`runtime_stats_map` 使用 per-CPU value，避免超高频路径上的共享计数竞争，打印时由用户态求和。
 
 ### 8.2 入口事件
 
-`ent` 的状态转移如下：
+普通模式保持原语义：wanted 命中后持续跟踪该 goroutine，直到 `goexit1`。cluster 模式改为按**完整 wanted 根调用**采样：
 
 ```text
-当前 IP 是 wanted？
-  是：确保 (pid, goid) 存在于 should_trace_goid，继续采集
-  否：当前 (pid, goid) 已经被触发？
-        是：继续采集
-        否：直接返回
+(pid, goid) 已处于某个采样根调用中？
+  是：继续采集其嵌套入口
+  否：当前 IP 不是 wanted → 忽略
+      当前 IP 是 wanted → 按 sample_config_map 的 1/N 概率准入
+                         → 准入后记录 root_ip/root_depth 并标记 TRACE_START
 ```
+
+采样决策只发生在根入口；一旦准入，该根调用内所有已挂载入口/返回都会整体采集，避免逐事件采样破坏调用栈配对。准入时的分母会固定保存到 `trace_state` 并随事件传递，即使运行中动态调节采样率，该完整样本仍使用同一个估计权重。递归进入同一 wanted 函数时用 `root_depth` 延迟样本结束。
 
 通过过滤后，入口事件记录：
 
@@ -352,22 +356,17 @@ bpf_get_current_task()
 
 ### 8.3 返回事件
 
-`ret` 只检查 `(pid, goid)` 是否已处于跟踪状态。通过后记录当前 `RET` IP、时间戳和可选返回值，然后写入 `event_queue`。
+`ret` 只检查 `(pid, goid)` 是否已处于跟踪状态。通过后记录当前 `RET` IP、时间戳和可选返回值，然后写入 `event_queue`。cluster 模式下若 `should_trace_ret` 表明这是采样根函数的最终返回，则事件带 `TRACE_END`，投递后删除该 `(pid, goid)` 的跟踪状态。
 
-入口和返回都要先抓取参数，再投递事件。用户态据此在处理某个事件时，从对应 `(pid, goid)` 的参数通道取出该 probe 预期数量的数据。
+入口和返回都先把参数叶子写入同一个完整 `event`，再一次性投递。因此 queue 过载只会拒绝完整事件，不会把某个事件与另一个事件的参数错误配对。
 
 ### 8.4 goroutine 退出
 
-`runtime.goexit1` 的探针执行两项操作：
-
-1. 从 `should_trace_goid` 删除 `(pid, goid)`；
-2. 向 `event_queue` 写入 `GOROUTINE_EXIT` 事件。
-
-第二项用于通知用户态释放该 goroutine 的参数 channel 和残留事件。当前探针没有先判断 goroutine 是否曾被跟踪，因此目标二进制中**所有** goroutine 退出都会产生该事件；高 churn 场景会额外占用 `event_queue`。回收通知也受队列容量约束，如果退出事件被淘汰，用户态状态不能得到及时回收。
+`runtime.goexit1` 先检查 `(pid, goid)` 是否处于跟踪状态；只有被跟踪的 goroutine 才会删除内核状态并投递 `GOROUTINE_EXIT`。用户态收到后释放残留调用栈和预算。这样未被采样的 goroutine 退出不会占用 `event_queue`；若退出通知因 queue 满而丢失，用户态的未闭合事件硬上限仍能阻止状态无限增长。
 
 ### 8.5 跟踪生命周期示例
 
-假设 attach 了 `main.A/main.B/main.C`，只有 `main.A` 是 wanted：
+以下是普通模式示例。假设 attach 了 `main.A/main.B/main.C`，只有 `main.A` 是 wanted：
 
 ```text
 G 调用 main.B       未触发，忽略
@@ -399,9 +398,9 @@ G 执行 goexit1      清除 G 的内核态和用户态状态
 
 ## 10. 用户态事件处理
 
-### 10.1 两条队列
+### 10.1 单事件队列
 
-`PollEvents` 和 `PollArg` 分别轮询 `event_queue` 与 `arg_queue`。参数由独立 goroutine 按 `(pid, goid)` 分发到 channel，主事件循环处理事件并按该 probe 的规则数消费参数。
+`PollEvents` 只启动一个 goroutine 轮询 `event_queue`。每条 queue 元素已经包含事件头和最多 8 个参数叶子，用户态不需要第二条参数队列或按 goid 分发参数。
 
 用户态结构按 PID 分层：
 
@@ -410,23 +409,15 @@ EventManager
   pids[pid] -> pidState
                  goEvents[goid]       已采集事件序列
                  goEventStack[goid]   当前已观测嵌套深度
-                 goArgs[goid]         参数数据 channel
                  agg[funcname]        聚类统计
+  suppressed[(pid,goid)]              因硬预算整段抑制的样本
 ```
 
-这种结构与内核 `should_trace_goid` 的复合 key 一起，保证同一二进制多个进程实例中的相同 goid 不会串扰。
+这种结构与内核 `should_trace_goid` 的复合 key 一起，保证同一二进制同时运行的不同 PID 中相同 goid 不会串扰；它不包含进程启动时间，极端 PID 复用场景仍需视为已知边界。
 
 ### 10.2 参数配对
 
-每个事件先通过 IP 反查 `Uprobe`，获得此位置对应的抓取规则列表，然后从该 `(pid, goid)` 的参数 channel 读取相同数量的 `arg_data`，格式化成 `name=value`。
-
-参数数据与事件没有共享序列号，当前配对依赖以下不变量：
-
-- 同一个 probe 中先依次写参数，再写事件；
-- 两条 BPF queue 各自保持 FIFO；
-- 用户态按 `(pid, goid)` 分发后，按规则声明顺序消费。
-
-这意味着参数流和事件流不是事务性提交。任一 queue 发生淘汰都可能破坏配对；尤其当事件仍在而其参数已丢失时，`nextArg` 会无超时等待对应 channel，主事件循环可能因此停止推进，周期汇总和正常退出也会受影响。
+每个事件先通过 IP 反查 `Uprobe`，校验 `event.arg_count` 与该位置的抓取规则数量一致，再直接渲染事件内嵌的 `arg_data[]`。内核在 per-CPU `event_buffer` 中组装完成后只 push 一次，因此参数与事件具有原子传输关系；读取失败由每个叶子的 `read_error` 独立标记为 `<unavailable>`。
 
 ### 10.3 调用栈闭合
 
@@ -459,9 +450,17 @@ EventManager
 
 - 调用次数；
 - `<=1us` 到 `<=10s` 以及 `>10s` 的固定延迟直方图；
-- 返回值字符串的出现次数，展示频次最高的前 10 项。
+- 返回值字符串的重频候选，展示频次最高的前 10 项。
 
-统计默认每 5 秒输出一次累计快照，并在退出时输出最终结果。周期输出不清零。`--cluster` 与 `--drilldown` 同时使用时，当前聚类路径不应用 drilldown 过滤。
+返回值使用固定 64 候选的加权 Space-Saving 算法；候选表未满时观测计数精确，发生替换后 observed 显示候选驻留期间实际看到的下界 `>=count`，estimated 显示加权值及误差上界。它避免高基数返回值让 map 无限增长。
+
+摘要同时输出 `observed` 和 `estimated`。`observed` 是实际收到且完整闭合的样本值；`estimated` 把每个观测调用按其根样本准入分母 `N` 做逆概率加权。queue 丢失通常呈突发相关性，而且完整调用树的存活概率不能由单个全局事件丢失率可靠还原，因此 `dropped_events` 只单独报告，不强行乘进函数估计；失效栈、内存保护丢弃和 PID LRU 淘汰同样不具备可靠的逐函数归因。estimated 是量级估算，不是无损审计结果。摘要顶部会分别展示主动 `sampled out` 根调用数、queue `dropped` 事件数、异常中止根调用数和用户态丢弃样本数。
+
+cluster 模式每秒读取 Go `HeapAlloc`，以 `--cluster-memory-limit-mb` 为目标，通过迟滞控制动态调整内核采样分母：达到 70%/85%/100% 时目标分母分别为 `8/64/1048576`，相同水位不会继续累乘；回落到 45% 后每秒减半直至恢复全采。采样率改变会写入 `sample_config_map`，后续 wanted 根调用立即使用新概率；已经准入的调用仍完整采完。
+
+动态采样是降低输入速率的闭环，不单独充当硬上限。每个内核采样根调用最多产生 4096 个事件，超限时发送 `TRACE_ABORT` 并回收状态，用于兜底 panic 跨帧、异常展开和超长调用。用户态另外把预算的四分之一按每事件 2048 字节的保守估算换算成未闭合事件上限；触顶时整段抑制该 `(pid, goid)` 直到 `TRACE_END`，若结束事件丢失则下一次 `TRACE_START` 会重置旧抑制。只有收到 `TRACE_END` 且入口/返回函数身份栈完全匹配的样本才会聚合。PID 聚合最多保留 64 个进程，超过后 LRU 淘汰会丢弃该 PID 的历史汇总并在输出中报告；抑制表最多 10000 项，返回值候选固定 64 项。这些边界共同保证 cluster 的可增长容器有界。这里限制的是 go-ftrace 自身 cluster 数据结构，不是操作系统级 RSS/cgroup 硬限制。
+
+统计默认每 5 秒输出一次累计快照，并在退出时输出最终结果。周期输出不清零。收到退出信号后先解除 links 停止生产，再排空 `event_queue`，最后读取累计丢失计数并打印，确保最终 observed 与运行统计覆盖同一批事件。`--cluster` 与 `--drilldown` 同时使用时，当前聚类路径不应用 drilldown 过滤。
 
 ## 11. 完整时序
 
@@ -483,9 +482,8 @@ sequenceDiagram
 
     loop 目标程序运行
         K->>K: 读取 pid/goid 并判断跟踪状态
-        K->>K: 可选抓取参数/返回值
-        K-->>EM: arg_queue
-        K-->>EM: event_queue
+        K->>K: 可选抓取参数/返回值并组装完整事件
+        K-->>EM: event_queue（event+args）
         EM->>EM: 按 pid/goid 配对、更新观测栈
         alt 深度归零且普通模式
             EM->>EM: 符号化并打印调用链
@@ -530,12 +528,13 @@ sequenceDiagram
 
 - `arg_rules_map`：100 个 probe point；
 - `should_trace_rip`：10000 个触发入口；
-- `should_trace_goid`：10000 个 goroutine；
-- `event_queue`：10000 条事件；
-- `arg_queue`：10000 条参数数据；
-- 每个 probe 最多 8 个抓取值；每个值包含 1 条寄存器基址规则和最多 7 步后续寻址；数据最多 64 字节。
+- `should_trace_goid`：10000 个正在跟踪的 goroutine/root call；
+- `should_trace_ret`：10000 个 wanted 返回点；
+- `event_queue`：10000 条完整事件；
+- 每个 probe 最多 8 个抓取值；每个值包含 1 条寄存器基址规则和最多 7 步后续寻址；数据最多 64 字节；
+- cluster：最多 64 个 PID、每函数 64 个返回值重频候选、10000 个整段抑制状态，未闭合事件数由内存目标计算。
 
-queue 满时使用 `BPF_EXIST` push，内核可淘汰较旧元素以写入新元素。这能限制内核内存，但高频调用、全量 goroutine 退出事件或用户态输出阻塞都可能导致丢数据。结果可能是孤立事件、未闭合观测栈或参数/事件流错配；当事件仍在而对应参数已丢失时，用户态还可能永久等待参数，使事件循环、周期汇总及正常退出停止推进。go-ftrace 是观测工具，不提供无损审计语义。
+queue 使用 `BPF_ANY` push。满载时保留已入队事件、拒绝新事件，并在 per-CPU `runtime_stats_map.dropped_events` 中精确累计失败次数；相比 `BPF_EXIST` 静默覆盖旧元素，这让事件损失可观测。高频调用或用户态处理阻塞仍可能形成孤立事件或未闭合观测栈。参数已内嵌，不会发生跨事件错配或等待参数卡死；cluster 要求 `TRACE_END` 和入口/返回函数身份栈同时完整，否则整段丢弃，并受未闭合事件硬上限保护。go-ftrace 是观测工具，不提供无损审计语义。
 
 ### 12.5 运行开销
 

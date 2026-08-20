@@ -68,6 +68,108 @@ func TestRenderEventArgsRejectsCountMismatch(t *testing.T) {
 	}
 }
 
+func TestClusterRejectsMismatchedReturn(t *testing.T) {
+	m := &EventManager{
+		cluster:          true,
+		pids:             map[uint32]*pidState{},
+		suppressed:       map[traceKey]struct{}{},
+		maxPendingEvents: 16,
+	}
+	s := m.pidState(1)
+	entry := bpf.GoftraceEvent{Pid: 1, Goid: 2, Ip: 0x100, Location: eventLocationEntry}
+	m.updateObservedStack(s, entry, uprobe.Uprobe{Address: 0x100})
+
+	retProbe := uprobe.Uprobe{Address: 0x201, RelOffset: 1}
+	event := bpf.GoftraceEvent{Pid: 1, Goid: 2, Ip: 0x201, Location: eventLocationRet, TraceFlags: traceFlagEnd}
+	m.updateObservedStack(s, event, retProbe)
+
+	if !m.CloseStack(event) {
+		t.Fatal("TRACE_END must terminate the sample")
+	}
+	if !s.invalid[2] {
+		t.Fatal("mismatched return must invalidate the sample")
+	}
+}
+
+func TestTraceStartResetsIncompletePreviousSample(t *testing.T) {
+	m := &EventManager{
+		cluster:          true,
+		pids:             map[uint32]*pidState{},
+		suppressed:       map[traceKey]struct{}{},
+		maxPendingEvents: 16,
+	}
+	s := m.pidState(1)
+	s.goEvents[2] = []Event{{GoftraceEvent: bpf.GoftraceEvent{Ip: 0x100}}}
+	s.goEventStack[2] = []uint64{0x100}
+	m.pendingEvents = 1
+
+	event := bpf.GoftraceEvent{Pid: 1, Goid: 2, Ip: 0x200, Location: eventLocationEntry, TraceFlags: traceFlagStart}
+	m.resetStaleSample(event)
+	if got := len(s.goEvents[2]); got != 0 {
+		t.Fatalf("events=%+v, want stale sample cleared", s.goEvents[2])
+	}
+	if m.droppedStacks != 1 {
+		t.Fatalf("discarded=%d, want 1 stale sample", m.droppedStacks)
+	}
+}
+
+func TestRecordClusterAccumulatesObservedAndEstimatedCounts(t *testing.T) {
+	s := newPidState()
+	s.recordCluster("main.hot", 5, "ok", 8)
+	s.recordCluster("main.hot", 5, "ok", 64)
+
+	agg := s.agg["main.hot"]
+	if agg.calls != 2 || agg.weightedCalls != 72 {
+		t.Fatalf("calls=%d weighted=%d, want 2 and 72", agg.calls, agg.weightedCalls)
+	}
+	if agg.latencies[0] != 2 || agg.weightedLatencies[0] != 72 {
+		t.Fatalf("latency observed=%d weighted=%d, want 2 and 72", agg.latencies[0], agg.weightedLatencies[0])
+	}
+	if got := agg.retvals["ok"]; got.count != 2 || got.weightedCount != 72 {
+		t.Fatalf("retval=%+v, want observed 2 and weighted 72", got)
+	}
+}
+
+func TestRecordRetvalUsesBoundedHeavyHitters(t *testing.T) {
+	agg := newFuncAgg()
+	for i := 0; i < maxClusterRetvals*4; i++ {
+		agg.recordRetval(string(rune(i+1)), 1)
+	}
+	for i := 0; i < 1000; i++ {
+		agg.recordRetval("hot", 1)
+	}
+
+	if len(agg.retvals) != maxClusterRetvals {
+		t.Fatalf("retvals size=%d, want %d", len(agg.retvals), maxClusterRetvals)
+	}
+	if count, ok := agg.retvals["hot"]; !ok || count.count < 1000 {
+		t.Fatalf("hot value missing or under-counted: %+v, present=%v", count, ok)
+	}
+}
+
+func TestRecordRetvalReplacementKeepsObservedLowerBound(t *testing.T) {
+	agg := newFuncAgg()
+	for i := 0; i < maxClusterRetvals; i++ {
+		agg.recordRetval(string(rune(i+1)), 8)
+	}
+	agg.recordRetval("replacement", 64)
+
+	got := agg.retvals["replacement"]
+	if got.count != 1 || got.weightedCount != 72 || got.weightedError != 8 {
+		t.Fatalf("replacement=%+v, want observed lower bound 1, weighted 72±8", got)
+	}
+}
+
+func TestRecordRetvalIsExactBeforeCapacity(t *testing.T) {
+	agg := newFuncAgg()
+	agg.recordRetval("ok", 8)
+	agg.recordRetval("ok", 8)
+
+	if got := agg.retvals["ok"]; got.count != 2 || got.weightedCount != 16 {
+		t.Fatalf("count=%+v, want observed 2 and weighted 16", got)
+	}
+}
+
 func TestRenderEventArgsDoesNotReusePreviousLeafData(t *testing.T) {
 	up := uprobe.Uprobe{
 		Funcname:  "main.send",
