@@ -116,7 +116,6 @@ flowchart LR
 | `-P, --trimprefix` | 去掉输出源码路径的公共前缀 |
 | `-c, --cluster` | 不逐条打印，改为聚合函数耗时和返回值 |
 | `--cluster-interval` | 聚合结果的周期输出间隔，默认 `5s`；设为 0 时只在退出时输出 |
-| `--memlock-limit` | 设置 `RLIMIT_MEMLOCK`；0 使用内置的 128 MiB 上限 |
 
 显式出现 `--fargs` 时，入口参数的自动推导会整体关闭；显式出现 `--frets` 时，返回值自动推导会整体关闭。两类开关相互独立。
 
@@ -559,7 +558,7 @@ uprobe 挂在可执行文件 inode/offset 上，并未限定某个 PID；只要�
 
 加载 eBPF 和创建 uprobe 需要相应权限。项目安装方式会将程序安装到 `/usr/sbin/ftrace` 并设置所需权限；具体安全考虑和部署方式见 [`../INSTALLATION.zh_CN.md`](../INSTALLATION.zh_CN.md)。
 
-程序把 `RLIMIT_MEMLOCK` 限制为默认 128 MiB，并提高 `RLIMIT_NOFILE` 以容纳大量 probe link。新内核通常通过 memcg 统计 BPF 对象内存，`RLIMIT_MEMLOCK` 主要仍用于兼容旧内核及限制普通 `mlock(2)`。
+程序把 `RLIMIT_MEMLOCK` 设为无限制，并提高 `RLIMIT_NOFILE` 以容纳大量 probe link。
 
 ## 13. 关键设计不变量
 

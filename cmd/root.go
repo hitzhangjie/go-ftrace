@@ -91,7 +91,6 @@ var rootCmd = &cobra.Command{
 
 		cluster, _ := cmd.Flags().GetBool("cluster")
 		clusterInterval, _ := cmd.Flags().GetDuration("cluster-interval")
-		memlockLimit, _ := cmd.Flags().GetInt64("memlock-limit")
 
 		// positional fetch rules are kept for backward compatibility and are
 		// treated as entry argument fetch rules
@@ -114,7 +113,7 @@ var rootCmd = &cobra.Command{
 			return err
 		}
 
-		if err := initLimit(memlockLimit); err != nil {
+		if err := initLimit(); err != nil {
 			return err
 		}
 
@@ -154,31 +153,16 @@ func init() {
 	rootCmd.Flags().BoolP("frets-auto", "R", true, "automatically derive return-value fetch rules from DWARF when no explicit --frets rule is given")
 	rootCmd.Flags().BoolP("cluster", "c", false, "aggregate per-function latency distribution and top-10 return values instead of printing every call")
 	rootCmd.Flags().Duration("cluster-interval", 5*time.Second, "periodic interval for printing the cumulative cluster summary (only valid with --cluster; 0 disables periodic printing and only prints on exit)")
-	rootCmd.Flags().Int64("memlock-limit", 0, "maximum amount of memory (in bytes) that may be locked via RLIMIT_MEMLOCK; 0 uses the built-in default")
 
 	rootCmd.MarkFlagRequired("uprobe-wildcards")
 }
 
-// defaultMemlockLimit caps how much memory the tracer process may lock
-// (RLIMIT_MEMLOCK). Previously this was set to RLIM_INFINITY, so a bug in the
-// tracer (or anything else in the process) could mlock unbounded amounts of
-// memory and destabilize the whole machine. The eBPF maps used by go-ftrace are
-// only a few MiB in total, so this cap is generous while still bounding the
-// worst-case impact.
-//
-// Note: on kernels >= 5.11 BPF map/program memory is accounted via memcg and no
-// longer charged against RLIMIT_MEMLOCK, so on modern kernels this limit mainly
-// guards mlock(2); on older kernels it also bounds BPF object memory.
-const defaultMemlockLimit = 128 << 20 // 128 MiB
-
-func initLimit(memlockLimit int64) error {
-	if memlockLimit <= 0 {
-		memlockLimit = defaultMemlockLimit
-	}
-
+// initLimit removes any cap on locked memory (RLIMIT_MEMLOCK) and raises
+// RLIMIT_NOFILE to accommodate a large number of probe links.
+func initLimit() error {
 	rlimit := syscall.Rlimit{
-		Cur: uint64(memlockLimit),
-		Max: uint64(memlockLimit),
+		Cur: unix.RLIM_INFINITY,
+		Max: unix.RLIM_INFINITY,
 	}
 	if err := syscall.Setrlimit(unix.RLIMIT_MEMLOCK, &rlimit); err != nil {
 		return fmt.Errorf("setrlimit RLIMIT_MEMLOCK: %w", err)
