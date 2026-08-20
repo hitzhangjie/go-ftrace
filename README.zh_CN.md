@@ -52,17 +52,18 @@ ftrace 现在可以从 DWARF 调试信息中自动推导出对应的提取规则
 sudo ftrace -u 'main.(*Student).String' ./main
 ```
 
-自动推导默认开启，且入参与返回值可分别独立控制（`--fargs-auto` 与 `--frets-auto`），其规则如下：
+自动推导默认开启，且入参与返回值可分别独立控制（`--fargs-auto` 与 `--frets-auto`）。它从 DWARF 恢复函数签名和 Go 类型树，再依据当前支持的 Go amd64 寄存器 ABI 推导值的位置：
 
-- 依据 Go 的寄存器 ABI（regabi），将函数入参按声明顺序映射到 `ax, bx, cx, di, si, r8...` 等寄存器；
-- 字符串展开为 `.data`（以 c64 读取字符串内容）与 `.len`；
-- 切片展开为 `.data / .len / .cap`；
-- 接口展开为 `.itab / .data`；
-- 指向结构体的指针会解引用并展开其字段；
-- 返回值同样按返回顺序映射到寄存器（`~r0/ret0`、`~r1/ret1` …）。
+- 标量按声明顺序映射到 `ax, bx, cx, di, si, r8...` 等整数寄存器；
+- 字符串展开为 `.data`（最多读取 64 字节）与 `.len`；
+- 切片展开为 `.data / .len / .cap`，当前不读取元素；
+- 接口额外采集运行时类型和值前缀，以尽力还原具体动态值；
+- 指向结构体的指针会解引用并按 DWARF 字段偏移递归展开；
+- 返回值同样按返回顺序从 `ax` 开始映射（`~r0/ret0`、`~r1/ret1` …）。
 
-如果某个函数已经显式给出了 `--fargs` / `--frets`，则显式规则优先，不会被覆盖；
-如需关闭自动推导，可分别传入 `--fargs-auto=false` 或 `--frets-auto=false`。
+命令行显式出现任意 `--fargs` 时，本次运行的入口 auto 会整体关闭；显式出现任意 `--frets` 时，返回 auto 会整体关闭。两个方向互不影响。如需主动关闭，可分别传入 `--fargs-auto=false` 或 `--frets-auto=false`。
+
+详细原理、类型展开方式、接口动态值还原及适用边界见 [Auto 模式原理：从 DWARF 类型到运行时参数值](./docs/AutoFetch.zh_CN.md)。
 
 # 安装方法
 

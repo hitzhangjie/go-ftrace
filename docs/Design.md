@@ -241,27 +241,24 @@ main.(*Student).String(
 自动推导分成两步：
 
 1. `elf.FunctionVariables` 从目标函数 DWARF DIE 的直接子节点中读取形参和返回值类型；返回值通过 `DW_AT_variable_parameter` 或 Go 的 `~rN` 命名识别。
-2. `internal/uprobe/auto.go` 按 Go amd64 寄存器 ABI 的整数寄存器顺序，把类型树展开到 `ax, bx, cx, di, si, r8, r9, r10, r11`。
+2. `internal/uprobe/auto.go` 按 Go amd64 寄存器 ABI 的整数寄存器顺序，把类型树展开到 `ax, bx, cx, di, si, r8, r9, r10, r11`，同时生成面向 BPF 的扁平 `FetchArg` 列表和面向用户态渲染的结构化 `Value` 树。
 
-这里没有求值 DWARF location expression，而是假定目标函数使用当前实现所支持的 Go amd64 寄存器 ABI，并根据声明顺序和类型结构推算位置。这种简化不覆盖 ABI0、栈传参/栈返回、浮点/复数寄存器，以及寄存器容量不足时整体回退到栈的情形；对这些函数应关闭自动推导并编写经过验证的手动规则。
+这里没有求值 DWARF location expression，而是假定目标函数使用当前实现所支持的 Go amd64 寄存器 ABI，并根据声明顺序和类型结构推算位置。这种简化不覆盖 ABI0、栈传参/栈返回、浮点/复数寄存器，以及寄存器容量不足时的完整栈回退规则；对这些函数应关闭自动推导并编写经过验证的手动规则。
 
 当前自动展开规则包括：
 
 | Go 类型 | 抓取方式 |
 | --- | --- |
 | 整数、布尔、枚举、普通指针 | 一个整数寄存器标量 |
-| `string` | `.data` 固定读取数据区前 8 字节，`.len` 单独输出；不会按长度重建完整字符串 |
-| slice | `.data/.len/.cap` 三个 word |
-| interface | `.itab/.data` 两个 word |
+| `string` | `.data` 最多读取数据区前 64 字节，`.len` 单独抓取并用于截断显示 |
+| slice | 抓取 `.data/.len/.cap` 三个 word，只显示头部，不读取元素 |
+| interface | 抓取动态类型地址、data word 和最多 64 字节的具体值前缀，用户态结合 runtime type 与 DWARF 递归还原 |
 | struct | 按字段递归展开 |
-| `*struct` | 读取指针 word，解引用后按字段偏移展开 |
+| `*struct` | 读取指针 word，解引用后按 DWARF 字段偏移展开 |
 
 对于可能为 nil 的 `*struct`，自动规则会设置 `nil_check`。内核发现基址寄存器为 0 时不再解引用，用户态把同一对象的多个扁平字段合并显示为 `ret0=nil` 之类的结果。
 
-自动推导还有两项针对 Go DWARF 的修正：
-
-- 只读取目标函数 DIE 的直接子节点，避免把词法块或内联子程序的参数误认为当前函数参数；
-- 对同名返回值去重，兼容含 `defer` 的函数可能生成重复 `~rN` DIE 的情况。
+自动推导还会只读取函数 DIE 的直接子节点，并对含 `defer` 的函数可能生成的重复 `~rN` 返回值 DIE 去重。完整原理、反射类比、接口动态值恢复和限制见 [`AutoFetch.zh_CN.md`](./AutoFetch.zh_CN.md)。
 
 ### 6.3 规则在 BPF map 中的表示
 
@@ -273,7 +270,7 @@ main.(*Student).String(
 - 每个值的 Go 侧 `Rules` 最多为 8 条，其中第一条是基址寄存器，因此后续最多 7 步偏移/解引用；
 - 单个抓取结果最多保存 64 字节。
 
-手动规则超过上限时会在加载阶段报错。自动展开通常在达到 8 个叶子时停止，但当前实现对一次展开出多个叶子的复合类型（如 string/slice/interface）没有预留容量：接近上限时可能生成超过 8 条规则并导致加载失败，而不是自动截断。
+手动规则超过上限时会在加载阶段报错。自动展开会为 string、slice、interface 这类复合值预留完整叶子容量，空间不足时整项跳过，避免只生成半个值；达到叶子或寄存器上限后会告警并保留此前已经成功生成的值。
 
 当前规则在 BPF 程序加载阶段一次性写入。map 本身是 HASH，但 CLI 尚未提供运行过程中动态增删规则的控制面。
 
@@ -284,7 +281,7 @@ main.(*Student).String(
 - `ARG_RULE_REG`：从 `pt_regs` 直接读取指定寄存器；
 - `ARG_RULE_MEMORY`：以寄存器值为基址，逐步执行“加偏移”或“解引用”，最后用 `bpf_probe_read_user` 读取目标内存。
 
-每个叶子值形成一条 `arg_data`，包含 `pid`、`goid`、数据和 nil 标记，然后进入 `arg_queue`。
+每个叶子形成一条 `arg_data`，包含数据、nil 标记和读取失败标记。所有叶子与事件头一起在 per-CPU `event_buffer` 中组装为完整 `event`，随后整体压入 `event_queue`，避免事件与参数在独立队列中发生错配。
 
 ## 7. 获取 goroutine ID
 
