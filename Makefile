@@ -1,23 +1,25 @@
-# Warn: 
-# 1. To load ebpf program into kernel require special privileges, 
-#    we just use `sudo` to do that.
-# 2. You may modify and build ths tool again, so you may want to 
-#    avoid copying the binary to /usr/sbin again and again, which
-#    is searchable by `sudo`, so we use `ln -sf` to create a symbolic
-#    link to ~/go/bin/ftrace instead.
+# Warn: To load an ebpf program into the kernel requires special privileges,
+# so the binary is installed to /usr/sbin owned by root with the setuid bit.
 GO ?= go1.22.2
 
-all:
+build:
 	cd cmd/ftrace && $(GO) build -v
 
-install:
-	cd cmd/ftrace && $(GO) install -v
-	sudo ln -sf ~/go/bin/ftrace /usr/sbin
-	sudo chown root:root ~/go/bin/ftrace
-	sudo chmod u+s /usr/sbin/ftrace
+# Build to a temporary file, then install into /usr/sbin in one step.
+# This avoids `go install` leaving a duplicate copy in GOBIN.
+#
+# `sudo install` command does the same thing as the install target
+#sudo chown root:root cmd/ftrace/ftrace
+#sudo chmod u+s cmd/ftrace/ftrace
+#sudo mv cmd/ftrace/ftrace /usr/sbin/ftrace
+install: build
+	sudo install -o root -g root -m 4755 cmd/ftrace/ftrace /usr/sbin/ftrace
+	rm -f cmd/ftrace/ftrace
+
+uninstall:
+	sudo rm -f /usr/sbin/ftrace
 
 clean:
-	rm -f ~/go/bin/ftrace
-	sudo rm -rf /usr/sbin/ftrace
+	rm -f cmd/ftrace/ftrace
 
-.PHONY: clean
+.PHONY: clean install
