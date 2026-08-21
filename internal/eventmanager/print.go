@@ -182,6 +182,29 @@ func printEstimateNote() {
 	fmt.Println("note: estimated counts are scaled by the sampling rate; dropped events and discarded samples are reported but not scaled")
 }
 
+// PrintWindowStats prints the deltas of the BPF counters since the previous
+// aggregate summary, so the effect of adaptive sampling is observable window
+// by window instead of only as cumulative totals (e.g. whether queue drops
+// are decreasing after the sampling rate was raised). Pass a zero-value prev
+// for the first window.
+func PrintWindowStats(prev, curr bpf.RuntimeStats) {
+	detected := curr.WantedRoots - prev.WantedRoots
+	skipped := curr.SampledOutRoots - prev.SampledOutRoots
+	queued := curr.EmittedEvents - prev.EmittedEvents
+	dropped := curr.DroppedEvents - prev.DroppedEvents
+
+	skippedRate := 0.0
+	if detected > 0 {
+		skippedRate = float64(skipped) * 100 / float64(detected)
+	}
+	lossRate := 0.0
+	if dropped > 0 {
+		lossRate = 100 / (1 + float64(queued)/float64(dropped))
+	}
+	fmt.Printf("window: detected=%d, skipped=%d (%.2f%%), queued=%d, dropped=%d (%.2f%%, queue full)\n",
+		detected, skipped, skippedRate, queued, dropped, lossRate)
+}
+
 // PrintAggregateSummary prints the aggregated per-function latency distribution
 // and top-10 return-value frequency distribution.
 func (m *EventManager) PrintAggregateSummary(stats bpf.RuntimeStats) {

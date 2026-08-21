@@ -240,10 +240,11 @@ requireConfirm:
 
 	// attach uprobes (and detach when exit). The initial adjust reports a
 	// change only when adaptive sampling is active, so the no-op sampler never
-	// writes the sample-config map.
+	// writes the sample-config map. There is no queue-loss window yet, so the
+	// initial rate is driven by heap usage alone.
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
-	denominator, changed := sampler.adjust(memory.HeapAlloc)
+	denominator, changed := sampler.adjust(memory.HeapAlloc, 0)
 	if changed {
 		if err = t.bpf.SetSampleDenominator(denominator); err != nil {
 			return fmt.Errorf("initialize adaptive sampling: %w", err)
@@ -294,6 +295,13 @@ requireConfirm:
 	defer samplingTicker.Stop()
 	samplingCh := samplingTicker.C
 
+	// Window deltas of the BPF queue counters, used to derive the recent loss
+	// rate fed into the sampling feedback loop.
+	var lastEmitted, lastDropped uint64
+	// Cumulative BPF snapshot from the previous aggregate summary, used to
+	// print per-window deltas alongside the cumulative totals.
+	var lastSummaryStats bpf.RuntimeStats
+
 	// PollEvents must be called exactly once. Calling it in the select expression
 	// would create and strand a new goroutine and channel on every loop iteration.
 	events := t.bpf.PollEvents(pollCtx)
@@ -326,18 +334,26 @@ loop:
 			// The sampling rate is always shown: the no-op sampler reports 1,
 			// i.e. every root call is collected.
 			fmt.Printf("\n[%s] aggregate summary (cumulative, sampling 1/%d)\n", time.Now().Format("15:04:05"), sampler.denominator())
+			eventmanager.PrintWindowStats(lastSummaryStats, stats)
+			lastSummaryStats = stats
 			mgr.PrintAggregateSummary(stats)
 		case <-samplingCh:
 			var memory runtime.MemStats
 			runtime.ReadMemStats(&memory)
-			denominator, changed := sampler.adjust(memory.HeapAlloc)
+			stats, statsErr := t.bpf.ReadRuntimeStats()
+			if statsErr != nil {
+				return fmt.Errorf("read sampling runtime stats: %w", statsErr)
+			}
+			lossRate := lossRateSince(&lastEmitted, &lastDropped, stats)
+			denominator, changed := sampler.adjust(memory.HeapAlloc, lossRate)
 			if !changed {
 				continue
 			}
 			if err = t.bpf.SetSampleDenominator(denominator); err != nil {
 				return fmt.Errorf("update adaptive sampling: %w", err)
 			}
-			log.Warnf("heap %d MiB, target %d MiB, sampling set to 1/%d", memory.HeapAlloc>>20, t.cfg.memoryLimitMB, denominator)
+			log.Warnf("heap %d MiB, target %d MiB, queue loss %.1f%%, sampling set to 1/%d",
+				memory.HeapAlloc>>20, t.cfg.memoryLimitMB, lossRate*100, denominator)
 		}
 	}
 	stats, err := t.bpf.ReadRuntimeStats()
@@ -345,4 +361,19 @@ loop:
 		return fmt.Errorf("read final runtime stats: %w", err)
 	}
 	return mgr.PrintRemaining(stats)
+}
+
+// lossRateSince returns the fraction of events dropped by the BPF event_queue
+// since the previous call, updating the stored cumulative counters. A window
+// with no produced events reports zero loss.
+func lossRateSince(lastEmitted, lastDropped *uint64, stats bpf.RuntimeStats) float64 {
+	windowEmitted := stats.EmittedEvents - *lastEmitted
+	windowDropped := stats.DroppedEvents - *lastDropped
+	*lastEmitted = stats.EmittedEvents
+	*lastDropped = stats.DroppedEvents
+	total := windowEmitted + windowDropped
+	if total == 0 {
+		return 0
+	}
+	return float64(windowDropped) / float64(total)
 }

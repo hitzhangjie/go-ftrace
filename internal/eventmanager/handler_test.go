@@ -1,8 +1,11 @@
 package eventmanager
 
 import (
+	"bytes"
 	"debug/dwarf"
 	"encoding/binary"
+	"io"
+	"os"
 	"testing"
 
 	"github.com/hitzhangjie/go-ftrace/internal/bpf"
@@ -262,5 +265,50 @@ func TestRenderEventArgsDoesNotReusePreviousLeafData(t *testing.T) {
 	second.Args[0].ReadError = 1
 	if got := renderEventArgs(up, second); got != "ret0.Code=<unavailable>" {
 		t.Fatalf("failed read reused data: %q", got)
+	}
+}
+
+func TestPrintWindowStatsReportsDeltas(t *testing.T) {
+	prev := bpf.RuntimeStats{WantedRoots: 100, SampledOutRoots: 0, EmittedEvents: 1000, DroppedEvents: 500}
+	curr := bpf.RuntimeStats{WantedRoots: 400, SampledOutRoots: 200, EmittedEvents: 2000, DroppedEvents: 600}
+
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	PrintWindowStats(prev, curr)
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	want := "window: detected=300, skipped=200 (66.67%), queued=1000, dropped=100 (9.09%, queue full)\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("PrintWindowStats() = %q, want %q", got, want)
+	}
+}
+
+func TestPrintWindowStatsFirstWindowIsZero(t *testing.T) {
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	PrintWindowStats(bpf.RuntimeStats{}, bpf.RuntimeStats{WantedRoots: 50, EmittedEvents: 300})
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	want := "window: detected=50, skipped=0 (0.00%), queued=300, dropped=0 (0.00%, queue full)\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("PrintWindowStats() = %q, want %q", got, want)
 	}
 }
