@@ -19,10 +19,11 @@ func (m *EventManager) Handle(event bpf.GoftraceEvent) error {
 		m.onGoroutineExit(event.Pid, event.Goid)
 		return nil
 	}
-	if m.cluster && event.TraceFlags&traceFlagAbort != 0 {
+	if m.adaptive && event.TraceFlags&traceFlagAbort != 0 {
 		delete(m.suppressed, traceKey{pid: event.Pid, goid: event.Goid})
 		m.dropStack(event.Pid, event.Goid)
 		m.droppedStacks++
+		m.droppedAborted++
 		return nil
 	}
 	if !m.Add(event) {
@@ -39,6 +40,7 @@ func (m *EventManager) Handle(event bpf.GoftraceEvent) error {
 			s := m.pidState(event.Pid)
 			if s.invalid[event.Goid] || len(s.goEventStack[event.Goid]) != 0 {
 				m.droppedStacks++
+				m.droppedIncomplete++
 				return nil
 			}
 			m.ClusterStack(event.Pid, event.Goid)
@@ -74,12 +76,13 @@ func (m *EventManager) resetStaleSample(event bpf.GoftraceEvent) {
 	if s := m.existingPidState(event.Pid); s != nil && len(s.goEvents[event.Goid]) > 0 {
 		m.dropStack(event.Pid, event.Goid)
 		m.droppedStacks++
+		m.droppedIncomplete++
 	}
 }
 
 func (m *EventManager) Add(event bpf.GoftraceEvent) bool {
 	key := traceKey{pid: event.Pid, goid: event.Goid}
-	if m.cluster {
+	if m.adaptive {
 		m.resetStaleSample(event)
 		if _, ok := m.suppressed[key]; ok {
 			if event.TraceFlags&traceFlagStart != 0 {
@@ -102,6 +105,7 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) bool {
 				m.suppressed[key] = struct{}{}
 			}
 			m.droppedStacks++
+			m.droppedOverBudget++
 			return false
 		}
 	}
@@ -122,7 +126,7 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) bool {
 			// dropping it cannot desynchronize subsequent events.
 			return false
 		}
-		if m.cluster && event.TraceFlags&traceFlagStart == 0 {
+		if m.adaptive && event.TraceFlags&traceFlagStart == 0 {
 			// The root entry was lost or deliberately suppressed. Do not retain a
 			// partial nested call tree that can never be trusted as a sample.
 			return false
@@ -144,7 +148,7 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) bool {
 		uprobe:        &probe,
 		argString:     argString,
 	})
-	if m.cluster {
+	if m.adaptive {
 		m.pendingEvents++
 	}
 	m.updateObservedStack(s, event, probe)
@@ -243,7 +247,7 @@ func (m *EventManager) dropStack(pid uint32, goid uint64) {
 	if s == nil {
 		return
 	}
-	if m.cluster {
+	if m.adaptive {
 		released := uint64(len(s.goEvents[goid]))
 		if released >= m.pendingEvents {
 			m.pendingEvents = 0

@@ -120,6 +120,7 @@ func (m *EventManager) PrintRemaining(stats bpf.RuntimeStats) (err error) {
 		for pid, s := range pids {
 			for goid := range s.goEvents {
 				m.droppedStacks++
+				m.droppedIncomplete++
 				m.dropStack(pid, goid)
 			}
 		}
@@ -133,6 +134,20 @@ func (m *EventManager) PrintRemaining(stats bpf.RuntimeStats) (err error) {
 			}
 		}
 	}
+	// Adaptive backpressure runs in every mode unless disabled, so report its
+	// sampling and loss counters here as well (cluster mode reports them in
+	// the summary). When adaptive sampling is off the BPF side never counts
+	// sampling decisions, so those lines are omitted.
+	fmt.Println()
+	printRuntimeStats(stats, m.adaptive)
+	if m.droppedStacks > 0 {
+		fmt.Printf("samples discarded: %d (incomplete %d, aborted %d, over memory budget %d)\n",
+			m.droppedStacks, m.droppedIncomplete, m.droppedAborted, m.droppedOverBudget)
+	}
+	if m.evictedPIDs > 0 {
+		fmt.Printf("memory guard: removed %d stale process states\n", m.evictedPIDs)
+	}
+	printEstimateNote(m.adaptive)
 	return
 }
 
@@ -140,21 +155,35 @@ func samplingEstimate(weighted uint64) float64 {
 	return float64(weighted)
 }
 
-func printRuntimeStats(stats bpf.RuntimeStats) {
-	sampledOutRate := 0.0
-	if stats.WantedRoots > 0 {
-		sampledOutRate = float64(stats.SampledOutRoots) * 100 / float64(stats.WantedRoots)
-	}
+func printRuntimeStats(stats bpf.RuntimeStats, adaptive bool) {
 	eventLossRate := 0.0
 	if stats.DroppedEvents > 0 {
 		eventLossRate = 100 / (1 + float64(stats.EmittedEvents)/float64(stats.DroppedEvents))
 	}
 
-	fmt.Printf("sampling: wanted roots=%d, admitted=%d, sampled out=%d (%.2f%%), state insert failures=%d\n",
-		stats.WantedRoots, stats.AdmittedRoots, stats.SampledOutRoots, sampledOutRate, stats.StateInsertFailures)
-	fmt.Printf("events: emitted=%d, dropped=%d (%.2f%%), aborted roots=%d\n",
+	// Sampling counters are only maintained by the BPF side when adaptive
+	// sampling is enabled; with --adaptive-sample=false they stay zero and
+	// would be misleading, so omit the whole line.
+	if adaptive {
+		sampledOutRate := 0.0
+		if stats.WantedRoots > 0 {
+			sampledOutRate = float64(stats.SampledOutRoots) * 100 / float64(stats.WantedRoots)
+		}
+		fmt.Printf("sampling: root calls detected=%d, collected=%d, skipped=%d (%.2f%%), state insert failures=%d\n",
+			stats.WantedRoots, stats.AdmittedRoots, stats.SampledOutRoots, sampledOutRate, stats.StateInsertFailures)
+	}
+	fmt.Printf("events: queued=%d, dropped=%d (%.2f%%, queue full), aborted roots=%d\n",
 		stats.EmittedEvents, stats.DroppedEvents, eventLossRate, stats.AbortedRoots)
-	fmt.Println("estimate: inverse root-sampling weights only; queue event loss and invalid/memory-discarded stacks are reported but not extrapolated")
+}
+
+// printEstimateNote explains how the estimated counts relate to the raw
+// counters above. It is printed last, after the discard/memory-guard lines.
+// With adaptive sampling off every sample keeps denominator 1, so estimates
+// equal the counted values and the note adds no information.
+func printEstimateNote(adaptive bool) {
+	if adaptive {
+		fmt.Println("note: estimated counts are scaled by the sampling rate; dropped events and discarded samples are reported but not scaled")
+	}
 }
 
 // PrintClusterSummary prints the aggregated per-function latency distribution
@@ -163,14 +192,16 @@ func (m *EventManager) PrintClusterSummary(stats bpf.RuntimeStats) {
 	pids := m.snapshotPids()
 
 	fmt.Println()
-	fmt.Println("==================== function latency & return-value summary ====================")
-	printRuntimeStats(stats)
+	fmt.Println("==================== function summary (latency & return values) ====================")
+	printRuntimeStats(stats, m.adaptive)
 	if m.droppedStacks > 0 {
-		fmt.Printf("samples: discarded=%d (incomplete, aborted, or over memory budget)\n", m.droppedStacks)
+		fmt.Printf("samples discarded: %d (incomplete %d, aborted %d, over memory budget %d)\n",
+			m.droppedStacks, m.droppedIncomplete, m.droppedAborted, m.droppedOverBudget)
 	}
 	if m.evictedPIDs > 0 {
-		fmt.Printf("memory guard: evicted %d least-recently-used PID summaries\n", m.evictedPIDs)
+		fmt.Printf("memory guard: removed %d stale process states\n", m.evictedPIDs)
 	}
+	printEstimateNote(m.adaptive)
 
 	// Sort pids for deterministic output. When only a single process is
 	// traced, keep the previous compact format (no pid section headers).
@@ -188,7 +219,7 @@ func (m *EventManager) PrintClusterSummary(stats bpf.RuntimeStats) {
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
 
 	for _, pid := range ordered {
-		fmt.Printf("\n########## pid=%d ##########\n", pid)
+		fmt.Printf("\n########## pid %d ##########\n", pid)
 		m.printClusterSummary(pids[pid].agg)
 	}
 }
@@ -203,9 +234,9 @@ func (m *EventManager) printClusterSummary(agg map[string]*funcAgg) {
 
 	for _, fn := range funcs {
 		a := agg[fn]
-		fmt.Printf("\n%s  (calls observed=%d, estimated≈%.0f)\n", fn, a.calls, samplingEstimate(a.weightedCalls))
+		fmt.Printf("\n%s  (counted %d calls, estimated ≈%.0f)\n", fn, a.calls, samplingEstimate(a.weightedCalls))
 
-		fmt.Println("  latency distribution (observed, estimated):")
+		fmt.Println("  latency distribution (counted, estimated):")
 		for i, b := range latencyBuckets {
 			fmt.Printf("    %-10s %d, ≈%.0f\n", b.label, a.latencies[i], samplingEstimate(a.weightedLatencies[i]))
 		}
@@ -231,13 +262,13 @@ func (m *EventManager) printClusterSummary(agg map[string]*funcAgg) {
 			if len(top) > 10 {
 				top = top[:10]
 			}
-			fmt.Printf("  return values (top %d; observed, estimated):\n", len(top))
+			fmt.Printf("  return values (top %d; counted, estimated):\n", len(top))
 			for _, e := range top {
 				estimated := samplingEstimate(e.count.weightedCount)
 				if e.count.weightedError == 0 {
 					fmt.Printf("    %-40s %d, ≈%.0f\n", e.v, e.count.count, estimated)
 				} else {
-					fmt.Printf("    %-40s >=%d, ≈%.0f (estimated error <= %.0f)\n", e.v, e.count.count, estimated, samplingEstimate(e.count.weightedError))
+					fmt.Printf("    %-40s at least %d, ≈%.0f (error within %.0f)\n", e.v, e.count.count, estimated, samplingEstimate(e.count.weightedError))
 				}
 			}
 		}

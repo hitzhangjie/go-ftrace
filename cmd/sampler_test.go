@@ -27,7 +27,33 @@ func TestAdaptiveSamplerCapsDenominator(t *testing.T) {
 	for i := 0; i < 16; i++ {
 		s.adjust(1)
 	}
-	if s.denominator != maxSampleDenominator {
-		t.Fatalf("denominator=%d, want cap %d", s.denominator, maxSampleDenominator)
+	if got := s.denominator(); got != maxSampleDenominator {
+		t.Fatalf("denominator=%d, want cap %d", got, maxSampleDenominator)
+	}
+}
+
+func TestNoopSamplerAlwaysCollects(t *testing.T) {
+	s := noopSampler{}
+	if s.active() {
+		t.Fatal("noop sampler must be inactive")
+	}
+	if denominator, changed := s.adjust(1 << 40); changed || denominator != 1 {
+		t.Fatalf("noop adjust: denominator=%d changed=%v, want 1,false", denominator, changed)
+	}
+	if denominator := s.denominator(); denominator != 1 {
+		t.Fatalf("noop denominator=%d, want 1", denominator)
+	}
+}
+
+func TestAdaptiveSamplerActive(t *testing.T) {
+	adaptive := newAdaptiveSampler(1000)
+	if !adaptive.active() {
+		t.Fatal("adaptive sampler must be active")
+	}
+	if _, changed := adaptive.adjust(700); !changed {
+		t.Fatal("adaptive sampler must adjust under 70% pressure")
+	}
+	if denominator, _ := adaptive.adjust(700); denominator != 8 {
+		t.Fatalf("denominator=%d, want 8", denominator)
 	}
 }

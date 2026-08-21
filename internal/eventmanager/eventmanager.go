@@ -50,6 +50,12 @@ type EventManager struct {
 	trimprefix string
 	cluster    bool
 
+	// adaptive enables the memory backpressure applied in every mode: root-call
+	// sampling (with the denominator driven by userspace heap usage), a hard cap
+	// on in-flight events, and LRU eviction of stale per-pid state. cluster only
+	// changes the output (aggregated summary vs per-call stack printing).
+	adaptive bool
+
 	// pidMu guards pids, which is lazily populated as new process instances
 	// are observed. Each process maintains its own complete set of
 	// goroutine-local state so that goroutine IDs (which reset per-process)
@@ -58,11 +64,14 @@ type EventManager struct {
 	pids  map[uint32]*pidState
 	seq   uint64
 
-	maxPendingEvents uint64
-	pendingEvents    uint64
-	droppedStacks    uint64
-	evictedPIDs      uint64
-	suppressed       map[traceKey]struct{}
+	maxPendingEvents  uint64
+	pendingEvents     uint64
+	droppedStacks     uint64
+	droppedIncomplete uint64
+	droppedAborted    uint64
+	droppedOverBudget uint64
+	evictedPIDs       uint64
+	suppressed        map[traceKey]struct{}
 
 	bootTime time.Time
 }
@@ -111,7 +120,7 @@ func (m *EventManager) pidState(pid uint32) *pidState {
 		return s
 	}
 
-	if m.cluster && len(m.pids) >= maxClusterPIDs {
+	if m.adaptive && len(m.pids) >= maxClusterPIDs {
 		var oldestPID uint32
 		var oldest *pidState
 		for candidatePID, candidate := range m.pids {
@@ -199,7 +208,7 @@ func newFuncAgg() *funcAgg {
 }
 
 // New create a new EventManager, which receives events via `ch`
-func New(uprobes []uprobe.Uprobe, elf *elf.ELF, drilldown, trimprefix string, cluster bool, clusterMemoryLimit uint64) (_ *EventManager, err error) {
+func New(uprobes []uprobe.Uprobe, elf *elf.ELF, drilldown, trimprefix string, cluster, adaptive bool, memoryLimit uint64) (_ *EventManager, err error) {
 	host, err := sysinfo.Host()
 	if err != nil {
 		return
@@ -215,12 +224,13 @@ func New(uprobes []uprobe.Uprobe, elf *elf.ELF, drilldown, trimprefix string, cl
 		drilldown:  drilldown,
 		trimprefix: trimprefix,
 		cluster:    cluster,
+		adaptive:   adaptive,
 		pids:       map[uint32]*pidState{},
 		suppressed: map[traceKey]struct{}{},
 		bootTime:   bootTime,
 	}
-	if cluster {
-		m.maxPendingEvents = clusterMemoryLimit / clusterEventBudgetDiv / estimatedEventBytes
+	if adaptive {
+		m.maxPendingEvents = memoryLimit / clusterEventBudgetDiv / estimatedEventBytes
 		if m.maxPendingEvents == 0 {
 			m.maxPendingEvents = 1
 		}

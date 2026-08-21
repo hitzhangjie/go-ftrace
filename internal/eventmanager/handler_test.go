@@ -91,6 +91,50 @@ func TestClusterRejectsMismatchedReturn(t *testing.T) {
 	}
 }
 
+func TestNonClusterAdaptiveBackpressure(t *testing.T) {
+	// Non-cluster mode still runs the adaptive backpressure: root samples are
+	// rejected once in-flight events exceed the budget, the rejected sample is
+	// suppressed until its root re-enters, and the whole sample is dropped.
+	m := &EventManager{
+		adaptive:         true,
+		pids:             map[uint32]*pidState{},
+		suppressed:       map[traceKey]struct{}{},
+		maxPendingEvents: 2,
+		pendingEvents:    2,
+	}
+	key := traceKey{pid: 1, goid: 2}
+
+	root := bpf.GoftraceEvent{Pid: 1, Goid: 2, Ip: 0x100, Location: eventLocationEntry, TraceFlags: traceFlagStart}
+	if m.Add(root) {
+		t.Fatal("over-budget root sample must be rejected")
+	}
+	if m.droppedStacks != 1 || m.droppedOverBudget != 1 {
+		t.Fatalf("dropped=%d over-budget=%d, want 1 and 1", m.droppedStacks, m.droppedOverBudget)
+	}
+	if _, ok := m.suppressed[key]; !ok {
+		t.Fatal("over-budget sample must be suppressed")
+	}
+
+	nested := bpf.GoftraceEvent{Pid: 1, Goid: 2, Ip: 0x101, Location: eventLocationEntry}
+	if m.Add(nested) {
+		t.Fatal("suppressed-sample events must be dropped")
+	}
+	if m.droppedStacks != 1 {
+		t.Fatalf("dropped=%d, want unchanged 1", m.droppedStacks)
+	}
+
+	// TRACE_START clears the suppression (Add then proceeds to uprobe
+	// resolution, which fails in this fixture because there is no elf).
+	m.pendingEvents = 0
+	root.Ip = 0 // ResolveAddress rejects ip==0 without touching the nil elf
+	if m.Add(root) {
+		t.Fatal("root Add must fail at uprobe resolution in this fixture")
+	}
+	if _, ok := m.suppressed[key]; ok {
+		t.Fatal("TRACE_START must clear suppression")
+	}
+}
+
 func TestTraceStartResetsIncompletePreviousSample(t *testing.T) {
 	m := &EventManager{
 		cluster:          true,

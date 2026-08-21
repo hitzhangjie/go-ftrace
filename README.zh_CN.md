@@ -40,10 +40,10 @@ go-ftrace 是一个基于Linux bpf(2) 的类似内核工具 ftrace(1) 的函数�
 高频函数建议使用 cluster 模式，并设置 go-ftrace 的堆内存目标：
 
 ```bash
-sudo ftrace -c --cluster-memory-limit-mb 256 -u 'main.hotPath' ./main
+sudo ftrace -c --memory-limit 256 -u 'main.hotPath' ./main
 ```
 
-cluster 会按完整根调用采样，而不是独立丢弃入口/返回事件；它每秒依据实际 Go 堆占用动态调整采样率，并对未闭合事件、PID 数和返回值重频候选设置固定上限。摘要会显示主动跳过的根调用数、queue 丢失事件数和失效样本数；每项聚类结果同时显示实际观测值 `observed` 与量级估计值 `estimated`。估计值使用样本准入时的采样分母做逆概率加权；queue 丢失具有相关性，只单独报告而不强行加入估计，因此结果不应视为无损审计数据。该参数约束的是 go-ftrace 的 cluster 数据结构和采样目标，不等同于操作系统级 RSS/cgroup 硬限制。
+自适应采样与内存背压对**所有模式**（包括非 cluster 的逐条打印）生效：事件按完整根调用采样，而不是独立丢弃入口/返回事件；它每秒依据实际 Go 堆占用动态调整采样率，并对未闭合事件、PID 数、返回值重频候选设置固定上限，防止高频命中时 go-ftrace 自身内存无限增长。`--memory-limit` 即该内存目标，`--adaptive-sample=false` 可关闭动态采样（始终采集每个根调用）。cluster 与普通模式的差异只在输出形式（按函数聚合汇总 vs 逐条打印调用栈）。结束（或 Ctrl+C）时统计会显示采样跳过数、队列溢出丢失数、异常中止数和被丢弃的调用样本数；cluster 的每项聚合结果同时显示实际计数 `counted` 与按采样率推算的量级估算 `estimated`。估算值使用样本准入时的采样分母做逆概率加权；队列溢出丢失的事件具有相关性，只单独报告而不强行计入估算，因此结果不应视为无损审计数据。该参数约束的是 go-ftrace 自身的数据结构和采样目标，不等同于操作系统级 RSS/cgroup 硬限制。
 
 示例目录下同时提供了一个 `examples/Makefile`, 你也可以执行 `make <target>` 来快速执行对应的命令（对应上面示例）来进行测试.
 

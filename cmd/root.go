@@ -91,24 +91,26 @@ var rootCmd = &cobra.Command{
 
 		cluster, _ := cmd.Flags().GetBool("cluster")
 		clusterInterval, _ := cmd.Flags().GetDuration("cluster-interval")
-		clusterMemoryLimitMB, _ := cmd.Flags().GetUint64("cluster-memory-limit-mb")
+		memoryLimitMB, _ := cmd.Flags().GetUint64("memory-limit")
+		adaptiveSample, _ := cmd.Flags().GetBool("adaptive-sample")
 
 		// positional fetch rules are kept for backward compatibility and are
 		// treated as entry argument fetch rules
 		fargs = append(fargs, args[1:]...)
 
 		cfg := &Config{
-			excludeVendor:        excludeVendor,
-			uprobeWildcards:      uprobeWildcards,
-			fargs:                fargs,
-			frets:                frets,
-			drilldown:            drilldown,
-			trimprefix:           trimprefix,
-			autoFetchArgs:        autoFetchArgs,
-			autoFetchRets:        autoFetchRets,
-			cluster:              cluster,
-			clusterInterval:      clusterInterval,
-			clusterMemoryLimitMB: clusterMemoryLimitMB,
+			excludeVendor:   excludeVendor,
+			uprobeWildcards: uprobeWildcards,
+			fargs:           fargs,
+			frets:           frets,
+			drilldown:       drilldown,
+			trimprefix:      trimprefix,
+			autoFetchArgs:   autoFetchArgs,
+			autoFetchRets:   autoFetchRets,
+			cluster:         cluster,
+			clusterInterval: clusterInterval,
+			memoryLimitMB:   memoryLimitMB,
+			adaptiveSample:  adaptiveSample,
 		}
 		tracer, err := NewTracer(bin, cfg)
 		if err != nil {
@@ -155,7 +157,8 @@ func init() {
 	rootCmd.Flags().BoolP("frets-auto", "R", true, "automatically derive return-value fetch rules from DWARF when no explicit --frets rule is given")
 	rootCmd.Flags().BoolP("cluster", "c", false, "aggregate per-function latency distribution and top-10 return values instead of printing every call")
 	rootCmd.Flags().Duration("cluster-interval", 5*time.Second, "periodic interval for printing the cumulative cluster summary (only valid with --cluster; 0 disables periodic printing and only prints on exit)")
-	rootCmd.Flags().Uint64("cluster-memory-limit-mb", 256, "cluster-mode heap target in MiB; sampling is reduced dynamically near the target and in-flight event storage is strictly bounded")
+	rootCmd.Flags().Uint64("memory-limit", 256, "Go heap target in MiB for adaptive backpressure: sampling is reduced near the target and in-flight event storage is strictly bounded")
+	rootCmd.Flags().Bool("adaptive-sample", true, "dynamically reduce root-call sampling when the Go heap nears --memory-limit; set to false to always collect every root call")
 
 	rootCmd.MarkFlagRequired("uprobe-wildcards")
 }
