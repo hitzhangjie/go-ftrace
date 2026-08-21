@@ -114,7 +114,7 @@ func (m *EventManager) SprintArg(arg *uprobe.FetchArg, data []uint8) (_ string, 
 
 func (m *EventManager) PrintRemaining(stats bpf.RuntimeStats) (err error) {
 	pids := m.snapshotPids()
-	if m.cluster {
+	if m.aggregate {
 		// Only complete root calls are valid samples. Incomplete stacks can be
 		// caused by queue overwrite or shutdown and must not bias aggregation.
 		for pid, s := range pids {
@@ -124,7 +124,7 @@ func (m *EventManager) PrintRemaining(stats bpf.RuntimeStats) (err error) {
 				m.dropStack(pid, goid)
 			}
 		}
-		m.PrintClusterSummary(stats)
+		m.PrintAggregateSummary(stats)
 		return nil
 	}
 	for pid, s := range pids {
@@ -135,11 +135,11 @@ func (m *EventManager) PrintRemaining(stats bpf.RuntimeStats) (err error) {
 		}
 	}
 	// Adaptive backpressure runs in every mode unless disabled, so report its
-	// sampling and loss counters here as well (cluster mode reports them in
-	// the summary). When adaptive sampling is off the BPF side never counts
-	// sampling decisions, so those lines are omitted.
+	// sampling and loss counters here as well (aggregate mode reports them in
+	// the summary). The BPF side maintains the sampling counters in every
+	// mode, so these lines are always shown.
 	fmt.Println()
-	printRuntimeStats(stats, m.adaptive)
+	printRuntimeStats(stats)
 	if m.droppedStacks > 0 {
 		fmt.Printf("samples discarded: %d (incomplete %d, aborted %d, over memory budget %d)\n",
 			m.droppedStacks, m.droppedIncomplete, m.droppedAborted, m.droppedOverBudget)
@@ -147,7 +147,7 @@ func (m *EventManager) PrintRemaining(stats bpf.RuntimeStats) (err error) {
 	if m.evictedPIDs > 0 {
 		fmt.Printf("memory guard: removed %d stale process states\n", m.evictedPIDs)
 	}
-	printEstimateNote(m.adaptive)
+	printEstimateNote()
 	return
 }
 
@@ -155,23 +155,21 @@ func samplingEstimate(weighted uint64) float64 {
 	return float64(weighted)
 }
 
-func printRuntimeStats(stats bpf.RuntimeStats, adaptive bool) {
+func printRuntimeStats(stats bpf.RuntimeStats) {
+	sampledOutRate := 0.0
+	if stats.WantedRoots > 0 {
+		sampledOutRate = float64(stats.SampledOutRoots) * 100 / float64(stats.WantedRoots)
+	}
 	eventLossRate := 0.0
 	if stats.DroppedEvents > 0 {
 		eventLossRate = 100 / (1 + float64(stats.EmittedEvents)/float64(stats.DroppedEvents))
 	}
 
-	// Sampling counters are only maintained by the BPF side when adaptive
-	// sampling is enabled; with --adaptive-sample=false they stay zero and
-	// would be misleading, so omit the whole line.
-	if adaptive {
-		sampledOutRate := 0.0
-		if stats.WantedRoots > 0 {
-			sampledOutRate = float64(stats.SampledOutRoots) * 100 / float64(stats.WantedRoots)
-		}
-		fmt.Printf("sampling: root calls detected=%d, collected=%d, skipped=%d (%.2f%%), state insert failures=%d\n",
-			stats.WantedRoots, stats.AdmittedRoots, stats.SampledOutRoots, sampledOutRate, stats.StateInsertFailures)
-	}
+	// Sampling counters are maintained by the BPF side in every mode: with
+	// adaptive sampling off (or a fixed rate of 1) skipped stays 0 and
+	// detected/collected count every root call.
+	fmt.Printf("sampling: root calls detected=%d, collected=%d, skipped=%d (%.2f%%), state insert failures=%d\n",
+		stats.WantedRoots, stats.AdmittedRoots, stats.SampledOutRoots, sampledOutRate, stats.StateInsertFailures)
 	fmt.Printf("events: queued=%d, dropped=%d (%.2f%%, queue full), aborted roots=%d\n",
 		stats.EmittedEvents, stats.DroppedEvents, eventLossRate, stats.AbortedRoots)
 }
@@ -179,21 +177,19 @@ func printRuntimeStats(stats bpf.RuntimeStats, adaptive bool) {
 // printEstimateNote explains how the estimated counts relate to the raw
 // counters above. It is printed last, after the discard/memory-guard lines.
 // With adaptive sampling off every sample keeps denominator 1, so estimates
-// equal the counted values and the note adds no information.
-func printEstimateNote(adaptive bool) {
-	if adaptive {
-		fmt.Println("note: estimated counts are scaled by the sampling rate; dropped events and discarded samples are reported but not scaled")
-	}
+// equal the counted values.
+func printEstimateNote() {
+	fmt.Println("note: estimated counts are scaled by the sampling rate; dropped events and discarded samples are reported but not scaled")
 }
 
-// PrintClusterSummary prints the aggregated per-function latency distribution
+// PrintAggregateSummary prints the aggregated per-function latency distribution
 // and top-10 return-value frequency distribution.
-func (m *EventManager) PrintClusterSummary(stats bpf.RuntimeStats) {
+func (m *EventManager) PrintAggregateSummary(stats bpf.RuntimeStats) {
 	pids := m.snapshotPids()
 
 	fmt.Println()
 	fmt.Println("==================== function summary (latency & return values) ====================")
-	printRuntimeStats(stats, m.adaptive)
+	printRuntimeStats(stats)
 	if m.droppedStacks > 0 {
 		fmt.Printf("samples discarded: %d (incomplete %d, aborted %d, over memory budget %d)\n",
 			m.droppedStacks, m.droppedIncomplete, m.droppedAborted, m.droppedOverBudget)
@@ -201,13 +197,13 @@ func (m *EventManager) PrintClusterSummary(stats bpf.RuntimeStats) {
 	if m.evictedPIDs > 0 {
 		fmt.Printf("memory guard: removed %d stale process states\n", m.evictedPIDs)
 	}
-	printEstimateNote(m.adaptive)
+	printEstimateNote()
 
 	// Sort pids for deterministic output. When only a single process is
 	// traced, keep the previous compact format (no pid section headers).
 	if len(pids) == 1 {
 		for _, s := range pids {
-			m.printClusterSummary(s.agg)
+			m.printAggregateSummary(s.agg)
 		}
 		return
 	}
@@ -220,12 +216,12 @@ func (m *EventManager) PrintClusterSummary(stats bpf.RuntimeStats) {
 
 	for _, pid := range ordered {
 		fmt.Printf("\n########## pid %d ##########\n", pid)
-		m.printClusterSummary(pids[pid].agg)
+		m.printAggregateSummary(pids[pid].agg)
 	}
 }
 
-// printClusterSummary renders the aggregation map for a single pidState.
-func (m *EventManager) printClusterSummary(agg map[string]*funcAgg) {
+// printAggregateSummary renders the aggregation map for a single pidState.
+func (m *EventManager) printAggregateSummary(agg map[string]*funcAgg) {
 	funcs := make([]string, 0, len(agg))
 	for fn := range agg {
 		funcs = append(funcs, fn)

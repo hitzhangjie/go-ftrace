@@ -11,7 +11,7 @@ go-ftrace 通过两层机制控制：
 - **生产端限速**：按完整根调用做概率采样（自适应），从源头减少事件量；
 - **消费端有界**：未闭合事件数、进程状态数、返回值重频候选均设上限，保证用户态数据结构有界。
 
-该机制对**所有模式**生效（cluster 聚合与普通逐条打印），`--memory-limit` 为内存目标。若用户不希望动态降采样，可用 `--adaptive-sample=false` 关闭：此时 BPF 侧不做采样决策，用户态也不启用抑制/预算等内存保护，始终采集每个根调用（高频场景下事件仍可能因队列溢出而丢失）。
+该机制对**所有模式**生效（aggregate 聚合与普通逐条打印），`--memory-limit` 为内存目标。若用户不希望动态降采样，可用 `--adaptive-sample=false` 关闭：此时 BPF 侧不做采样决策，用户态也不启用抑制/预算等内存保护，始终采集每个根调用（高频场景下事件仍可能因队列溢出而丢失）。
 
 ## 2. 采样决策只在根 entry 发生
 
@@ -95,7 +95,7 @@ if length == 0 {
 
 | 原因 | 触发点 |
 | --- | --- |
-| incomplete | 队列丢事件导致的残留栈重置（`resetStaleSample`）、cluster 下栈身份不匹配、退出时残留栈 |
+| incomplete | 队列丢事件导致的残留栈重置（`resetStaleSample`）、aggregate 下栈身份不匹配、退出时残留栈 |
 | aborted | BPF 单根调用事件数超 4096 发 `TRACE_ABORT` |
 | over memory budget | 用户态未闭合事件数超过预算（`pendingEvents >= maxPendingEvents`），整段抑制该 `(pid, goid)` |
 

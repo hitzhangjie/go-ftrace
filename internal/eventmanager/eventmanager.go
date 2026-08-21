@@ -22,11 +22,11 @@ const (
 	traceFlagEnd   uint8 = 2
 	traceFlagAbort uint8 = 4
 
-	maxClusterPIDs        = 64
-	maxClusterRetvals     = 64
-	maxClusterSuppressed  = 10000
-	estimatedEventBytes   = 2048
-	clusterEventBudgetDiv = 4
+	maxAggregatePIDs       = 64
+	maxAggregateRetvals    = 64
+	maxAggregateSuppressed = 10000
+	estimatedEventBytes    = 2048
+	aggEventBudgetDiv      = 4
 )
 
 // Event represents a func enter/ret event, see ftrace.c event
@@ -48,12 +48,12 @@ type EventManager struct {
 
 	drilldown  string
 	trimprefix string
-	cluster    bool
+	aggregate  bool
 
 	// adaptive enables the memory backpressure applied in every mode: root-call
 	// sampling (with the denominator driven by userspace heap usage), a hard cap
-	// on in-flight events, and LRU eviction of stale per-pid state. cluster only
-	// changes the output (aggregated summary vs per-call stack printing).
+	// on in-flight events, and LRU eviction of stale per-pid state. aggregate
+	// only changes the output (aggregated summary vs per-call stack printing).
 	adaptive bool
 
 	// pidMu guards pids, which is lazily populated as new process instances
@@ -86,8 +86,8 @@ type pidState struct {
 	invalid      map[uint64]bool
 	lastSeen     uint64
 
-	// agg holds per-function clustering statistics keyed by function name.
-	// Clustering is scoped per-pid so concurrently running processes do not
+	// agg holds per-function aggregation statistics keyed by function name.
+	// Aggregation is scoped per-pid so concurrently running processes do not
 	// mix latency/return-value distributions. PID reuse remains a known boundary.
 	agg map[string]*funcAgg
 }
@@ -120,7 +120,7 @@ func (m *EventManager) pidState(pid uint32) *pidState {
 		return s
 	}
 
-	if m.adaptive && len(m.pids) >= maxClusterPIDs {
+	if m.adaptive && len(m.pids) >= maxAggregatePIDs {
 		var oldestPID uint32
 		var oldest *pidState
 		for candidatePID, candidate := range m.pids {
@@ -184,7 +184,7 @@ var latencyBuckets = []struct {
 	{10 * time.Second, "<=10s"},
 }
 
-// funcAgg accumulates clustering statistics for a single traced function.
+// funcAgg accumulates aggregation statistics for a single traced function.
 type retvalCount struct {
 	count         uint64
 	weightedCount uint64
@@ -208,7 +208,7 @@ func newFuncAgg() *funcAgg {
 }
 
 // New create a new EventManager, which receives events via `ch`
-func New(uprobes []uprobe.Uprobe, elf *elf.ELF, drilldown, trimprefix string, cluster, adaptive bool, memoryLimit uint64) (_ *EventManager, err error) {
+func New(uprobes []uprobe.Uprobe, elf *elf.ELF, drilldown, trimprefix string, aggregate, adaptive bool, memoryLimit uint64) (_ *EventManager, err error) {
 	host, err := sysinfo.Host()
 	if err != nil {
 		return
@@ -223,14 +223,14 @@ func New(uprobes []uprobe.Uprobe, elf *elf.ELF, drilldown, trimprefix string, cl
 		uprobes:    uprobesMap,
 		drilldown:  drilldown,
 		trimprefix: trimprefix,
-		cluster:    cluster,
+		aggregate:  aggregate,
 		adaptive:   adaptive,
 		pids:       map[uint32]*pidState{},
 		suppressed: map[traceKey]struct{}{},
 		bootTime:   bootTime,
 	}
 	if adaptive {
-		m.maxPendingEvents = memoryLimit / clusterEventBudgetDiv / estimatedEventBytes
+		m.maxPendingEvents = memoryLimit / aggEventBudgetDiv / estimatedEventBytes
 		if m.maxPendingEvents == 0 {
 			m.maxPendingEvents = 1
 		}

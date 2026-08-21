@@ -34,16 +34,16 @@ func (m *EventManager) Handle(event bpf.GoftraceEvent) error {
 		// 有错没错都要清空栈
 		defer m.ClearStack(event)
 
-		// 聚类模式：不再逐条打印调用栈，而是按函数聚合延迟与返回值分布，
+		// 聚合模式：不再逐条打印调用栈，而是按函数聚合延迟与返回值分布，
 		// 避免高频调用刷屏，同时降低与 grep/tee 等管道结合时的内存占用。
-		if m.cluster {
+		if m.aggregate {
 			s := m.pidState(event.Pid)
 			if s.invalid[event.Goid] || len(s.goEventStack[event.Goid]) != 0 {
 				m.droppedStacks++
 				m.droppedIncomplete++
 				return nil
 			}
-			m.ClusterStack(event.Pid, event.Goid)
+			m.AggregateStack(event.Pid, event.Goid)
 			return nil
 		}
 
@@ -97,7 +97,7 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) bool {
 		if m.pendingEvents >= m.maxPendingEvents {
 			m.dropStack(event.Pid, event.Goid)
 			if event.TraceFlags&traceFlagEnd == 0 {
-				if len(m.suppressed) >= maxClusterSuppressed {
+				if len(m.suppressed) >= maxAggregateSuppressed {
 					for suppressedKey := range m.suppressed {
 						delete(m.suppressed, suppressedKey)
 					}
@@ -161,7 +161,7 @@ func (m *EventManager) updateObservedStack(s *pidState, event bpf.GoftraceEvent,
 		s.goEventStack[event.Goid] = append(s.goEventStack[event.Goid], event.Ip)
 	case eventLocationRet:
 		stack := s.goEventStack[event.Goid]
-		if m.cluster && (len(stack) == 0 || stack[len(stack)-1] != probe.Address-probe.RelOffset) {
+		if m.aggregate && (len(stack) == 0 || stack[len(stack)-1] != probe.Address-probe.RelOffset) {
 			s.invalid[event.Goid] = true
 		} else if len(stack) > 0 {
 			s.goEventStack[event.Goid] = stack[:len(stack)-1]
@@ -230,9 +230,13 @@ func processMemoryReader(pid uint32) func(uint64, []byte) error {
 // be expanded and shrinked again, and we will print the stack again, too.
 func (m *EventManager) CloseStack(event bpf.GoftraceEvent) bool {
 	s := m.pidState(event.Pid)
-	if m.cluster {
+	if m.aggregate && m.adaptive {
+		// In adaptive mode the BPF side marks the sample with TRACE_END when
+		// the wanted root call returns.
 		return event.TraceFlags&traceFlagEnd != 0
 	}
+	// Without adaptive sampling the BPF side never emits TRACE_START/TRACE_END,
+	// so fall back to the plain stack-depth check used by the print path.
 	return len(s.goEventStack[event.Goid]) == 0 && len(s.goEvents[event.Goid]) > 0
 }
 
@@ -267,11 +271,11 @@ func (m *EventManager) onGoroutineExit(pid uint32, goid uint64) {
 	m.dropStack(pid, goid)
 }
 
-// ClusterStack aggregates the latency and return-value distributions of the
+// AggregateStack aggregates the latency and return-value distributions of the
 // functions recorded on the given goroutine instead of printing each call.
 // Entry/ret events are paired in LIFO order to derive per-call latency, and
 // the flattened return-value string is counted for frequency distribution.
-func (m *EventManager) ClusterStack(pid uint32, goid uint64) {
+func (m *EventManager) AggregateStack(pid uint32, goid uint64) {
 	s := m.pidState(pid)
 	type frame struct {
 		entryIP uint64
@@ -294,13 +298,13 @@ func (m *EventManager) ClusterStack(pid uint32, goid uint64) {
 			current := frames[len(frames)-1]
 			frames = frames[:len(frames)-1]
 			elapsed := event.TimeNs - current.start
-			s.recordCluster(event.uprobe.Funcname, time.Duration(elapsed), event.argString, current.weight)
+			s.recordAgg(event.uprobe.Funcname, time.Duration(elapsed), event.argString, current.weight)
 		}
 	}
 }
 
-// recordCluster updates the aggregation counters for a single traced function.
-func (s *pidState) recordCluster(funcname string, elapsed time.Duration, retval string, weight uint64) {
+// recordAgg updates the aggregation counters for a single traced function.
+func (s *pidState) recordAgg(funcname string, elapsed time.Duration, retval string, weight uint64) {
 	agg := s.agg[funcname]
 	if agg == nil {
 		agg = newFuncAgg()
@@ -339,7 +343,7 @@ func (a *funcAgg) recordRetval(retval string, weight uint64) {
 		a.retvals[retval] = current
 		return
 	}
-	if len(a.retvals) < maxClusterRetvals {
+	if len(a.retvals) < maxAggregateRetvals {
 		a.retvals[retval] = retvalCount{count: 1, weightedCount: weight}
 		return
 	}

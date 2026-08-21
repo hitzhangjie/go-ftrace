@@ -89,8 +89,8 @@ var rootCmd = &cobra.Command{
 			autoFetchRets = false
 		}
 
-		cluster, _ := cmd.Flags().GetBool("cluster")
-		clusterInterval, _ := cmd.Flags().GetDuration("cluster-interval")
+		aggregate, _ := cmd.Flags().GetBool("aggregate")
+		aggregateInterval, _ := cmd.Flags().GetDuration("aggregate-interval")
 		memoryLimitMB, _ := cmd.Flags().GetUint64("memory-limit")
 		adaptiveSample, _ := cmd.Flags().GetBool("adaptive-sample")
 
@@ -99,18 +99,18 @@ var rootCmd = &cobra.Command{
 		fargs = append(fargs, args[1:]...)
 
 		cfg := &Config{
-			excludeVendor:   excludeVendor,
-			uprobeWildcards: uprobeWildcards,
-			fargs:           fargs,
-			frets:           frets,
-			drilldown:       drilldown,
-			trimprefix:      trimprefix,
-			autoFetchArgs:   autoFetchArgs,
-			autoFetchRets:   autoFetchRets,
-			cluster:         cluster,
-			clusterInterval: clusterInterval,
-			memoryLimitMB:   memoryLimitMB,
-			adaptiveSample:  adaptiveSample,
+			excludeVendor:     excludeVendor,
+			uprobeWildcards:   uprobeWildcards,
+			fargs:             fargs,
+			frets:             frets,
+			drilldown:         drilldown,
+			trimprefix:        trimprefix,
+			autoFetchArgs:     autoFetchArgs,
+			autoFetchRets:     autoFetchRets,
+			aggregate:         aggregate,
+			aggregateInterval: aggregateInterval,
+			memoryLimitMB:     memoryLimitMB,
+			adaptiveSample:    adaptiveSample,
 		}
 		tracer, err := NewTracer(bin, cfg)
 		if err != nil {
@@ -147,18 +147,18 @@ func init() {
 
 	rootCmd.Flags().BoolP("debug", "d", false, "enable debug logging")
 
-	rootCmd.Flags().StringSliceP("uprobe-wildcards", "u", nil, "wildcards for code to add uprobes")
-	rootCmd.Flags().BoolP("exclude-vendor", "x", true, "exclude vendor")
-	rootCmd.Flags().StringP("drilldown", "D", "", "drill down analysis")
-	rootCmd.Flags().StringP("trimprefix", "P", "", "trim filepath prefix")
-	rootCmd.Flags().StringArrayP("fargs", "f", nil, "fetch arguments at function entry, e.g. 'main.(*T).M(a=(*+0(%ax)):s64)'")
-	rootCmd.Flags().StringArrayP("frets", "r", nil, "fetch return values at function return, e.g. 'main.(*T).M(err=(*+0(%ax)):s64)'")
-	rootCmd.Flags().BoolP("fargs-auto", "A", true, "automatically derive entry-argument fetch rules from DWARF when no explicit --fargs rule is given")
-	rootCmd.Flags().BoolP("frets-auto", "R", true, "automatically derive return-value fetch rules from DWARF when no explicit --frets rule is given")
-	rootCmd.Flags().BoolP("cluster", "c", false, "aggregate per-function latency distribution and top-10 return values instead of printing every call")
-	rootCmd.Flags().Duration("cluster-interval", 5*time.Second, "periodic interval for printing the cumulative cluster summary (only valid with --cluster; 0 disables periodic printing and only prints on exit)")
-	rootCmd.Flags().Uint64("memory-limit", 256, "Go heap target in MiB for adaptive backpressure: sampling is reduced near the target and in-flight event storage is strictly bounded")
-	rootCmd.Flags().Bool("adaptive-sample", true, "dynamically reduce root-call sampling when the Go heap nears --memory-limit; set to false to always collect every root call")
+	rootCmd.Flags().StringSliceP("uprobe-wildcards", "u", nil, "functions to add uprobes")
+	rootCmd.Flags().BoolP("exclude-vendor", "x", true, "exclude vendor packages")
+	rootCmd.Flags().StringP("drilldown", "D", "", "drill down into a function")
+	rootCmd.Flags().StringP("trimprefix", "P", "", "trim filepath prefix in output")
+	rootCmd.Flags().StringArrayP("fargs", "f", nil, "fetch entry arguments, e.g. 'main.(*T).M(a=(*+0(%ax)):s64)'")
+	rootCmd.Flags().StringArrayP("frets", "r", nil, "fetch return values, e.g. 'main.(*T).M(err=(*+0(%ax)):s64)'")
+	rootCmd.Flags().BoolP("fargs-auto", "A", true, "derive entry-argument rules from DWARF when no --fargs is given")
+	rootCmd.Flags().BoolP("frets-auto", "R", true, "derive return-value rules from DWARF when no --frets is given")
+	rootCmd.Flags().Bool("aggregate", false, "aggregate per-function latency and top-10 return values instead of printing every call")
+	rootCmd.Flags().Duration("aggregate-interval", 3*time.Second, "interval for periodic aggregate summary; 0 prints only on exit")
+	rootCmd.Flags().Uint64("memory-limit", 256, "Go heap target (MiB) for adaptive backpressure")
+	rootCmd.Flags().Bool("adaptive-sample", true, "dynamically reduce sampling near --memory-limit; false collects every root call")
 
 	rootCmd.MarkFlagRequired("uprobe-wildcards")
 }

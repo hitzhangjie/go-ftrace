@@ -428,19 +428,19 @@ int ent(struct pt_regs *ctx)
 	{
 		if (!wanted)
 			return 0;
-		__u32 denominator = 1;
+		// Sampling statistics are maintained regardless of whether adaptive
+		// sampling is enabled. With adaptive sampling off (or a fixed rate of
+		// 1) the denominator stays 1, so every root call is admitted and
+		// sampled_out_roots stays 0.
 		struct runtime_stats *stats = get_runtime_stats();
-		if (CONFIG.adaptive_sampling)
+		__u32 denominator = current_sample_denominator();
+		if (stats)
+			stats->wanted_roots++;
+		if (!should_sample(denominator))
 		{
-			denominator = current_sample_denominator();
 			if (stats)
-				stats->wanted_roots++;
-			if (!should_sample(denominator))
-			{
-				if (stats)
-					stats->sampled_out_roots++;
-				return 0;
-			}
+				stats->sampled_out_roots++;
+			return 0;
 		}
 		struct trace_state initial = {
 			.root_ip = e->ip,
@@ -457,12 +457,10 @@ int ent(struct pt_regs *ctx)
 			return 0;
 		}
 		e->sample_denominator = denominator;
+		if (stats)
+			stats->admitted_roots++;
 		if (CONFIG.adaptive_sampling)
-		{
-			if (stats)
-				stats->admitted_roots++;
 			e->trace_flags = TRACE_START;
-		}
 	}
 	else
 	{

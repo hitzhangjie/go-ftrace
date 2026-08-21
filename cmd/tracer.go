@@ -39,9 +39,9 @@ type Config struct {
 	autoFetchArgs bool
 	autoFetchRets bool
 
-	// cluster
-	cluster         bool
-	clusterInterval time.Duration
+	// aggregate
+	aggregate         bool
+	aggregateInterval time.Duration
 
 	// sampling
 	adaptiveSample bool
@@ -272,18 +272,18 @@ requireConfirm:
 	mgr, err := eventmanager.New(uprobes, t.elf,
 		t.cfg.drilldown,
 		t.cfg.trimprefix,
-		t.cfg.cluster,
+		t.cfg.aggregate,
 		t.cfg.adaptiveSample,
 		memoryLimit)
 	if err != nil {
 		return
 	}
 
-	// 聚类模式下按固定周期打印中间汇总（累计统计，不重置），
+	// 聚合模式下按固定周期打印中间汇总（累计统计，不重置），
 	// 避免长时间运行时只能靠 Ctrl+C 才能看到结果。
 	var summaryCh <-chan time.Time
-	if t.cfg.cluster && t.cfg.clusterInterval > 0 {
-		ticker := time.NewTicker(t.cfg.clusterInterval)
+	if t.cfg.aggregate && t.cfg.aggregateInterval > 0 {
+		ticker := time.NewTicker(t.cfg.aggregateInterval)
 		summaryCh = ticker.C
 		defer ticker.Stop()
 	}
@@ -321,14 +321,12 @@ loop:
 		case <-summaryCh:
 			stats, statsErr := t.bpf.ReadRuntimeStats()
 			if statsErr != nil {
-				return fmt.Errorf("read cluster runtime stats: %w", statsErr)
+				return fmt.Errorf("read aggregate runtime stats: %w", statsErr)
 			}
-			if sampler.active() {
-				fmt.Printf("\n[%s] cluster summary (cumulative, sampling 1/%d)\n", time.Now().Format("15:04:05"), sampler.denominator())
-			} else {
-				fmt.Printf("\n[%s] cluster summary (cumulative)\n", time.Now().Format("15:04:05"))
-			}
-			mgr.PrintClusterSummary(stats)
+			// The sampling rate is always shown: the no-op sampler reports 1,
+			// i.e. every root call is collected.
+			fmt.Printf("\n[%s] aggregate summary (cumulative, sampling 1/%d)\n", time.Now().Format("15:04:05"), sampler.denominator())
+			mgr.PrintAggregateSummary(stats)
 		case <-samplingCh:
 			var memory runtime.MemStats
 			runtime.ReadMemStats(&memory)

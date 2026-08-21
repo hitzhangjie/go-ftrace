@@ -96,7 +96,7 @@ flowchart LR
 | `elf/` | ELF/DWARF 读取、符号解析、PC/文件偏移转换、反汇编、Go runtime 偏移解析 |
 | `internal/uprobe/` | 函数匹配、探针描述、手动规则解析、自动规则推导 |
 | `internal/bpf/` | eBPF C 程序、bpf2go 产物、map 初始化、uprobe 挂载和队列轮询 |
-| `internal/eventmanager/` | 参数配对、按 PID/goid 维护状态、调用栈闭合、逐条打印和聚类统计 |
+| `internal/eventmanager/` | 参数配对、按 PID/goid 维护状态、调用栈闭合、逐条打印和聚合统计 |
 
 ## 4. 从命令行到探针列表
 
@@ -114,8 +114,8 @@ flowchart LR
 | `-R, --frets-auto` | 默认开启；自动推导返回值规则 |
 | `-D, --drilldown` | 仅打印根函数名与指定值相同的闭合调用栈 |
 | `-P, --trimprefix` | 去掉输出源码路径的公共前缀 |
-| `-c, --cluster` | 不逐条打印，改为聚合函数耗时和返回值；动态采样与有界内存保护在所有模式下均启用 |
-| `--cluster-interval` | 聚合结果的周期输出间隔，默认 `5s`；设为 0 时只在退出时输出 |
+| `-c, --aggregate` | 不逐条打印，改为聚合函数耗时和返回值；动态采样与有界内存保护在所有模式下均启用 |
+| `--aggregate-interval` | 聚合结果的周期输出间隔，默认 `5s`；设为 0 时只在退出时输出 |
 | `--memory-limit` | Go 堆目标，默认 `256` MiB；用于自适应采样和未闭合事件硬上限 |
 | `--adaptive-sample` | 默认开启；按 Go 堆占用动态调整根调用采样率，并对未闭合事件、PID 数设上限。设为 `false` 时始终采集每个根调用（不降采样，也无用户态内存保护） |
 
@@ -320,7 +320,7 @@ bpf_get_current_task()
 | map | 类型 | key/value | 用途 |
 | --- | --- | --- | --- |
 | `should_trace_rip` | HASH | 入口 IP → bool | 用户态写入的静态 wanted 触发点集合 |
-| `should_trace_ret` | HASH | wanted RET IP → 函数入口 IP | 标识 cluster 样本的根调用返回边界 |
+| `should_trace_ret` | HASH | wanted RET IP → 函数入口 IP | 标识 aggregate 样本的根调用返回边界 |
 | `should_trace_goid` | HASH | `(pid, goid)` → `trace_state` | 内核态动态维护的已采样根调用状态 |
 | `sample_config_map` | ARRAY | 固定 key 0 → 采样分母 | 用户态运行中动态写入，`N` 表示约采 `1/N` 个 wanted 根调用 |
 | `runtime_stats_map` | PERCPU_ARRAY | 固定 key 0 → 运行统计 | 统计 wanted/admitted/sampled-out roots、状态插入失败，以及成功/失败投递的事件数和中止样本数 |
@@ -410,7 +410,7 @@ EventManager
   pids[pid] -> pidState
                  goEvents[goid]       已采集事件序列
                  goEventStack[goid]   当前已观测嵌套深度
-                 agg[funcname]        聚类统计
+                 agg[funcname]        聚合统计
   suppressed[(pid,goid)]              因硬预算整段抑制的样本
 ```
 
@@ -425,7 +425,7 @@ EventManager
 对每个 `(pid, goid)`，入口事件使 `goEventStack` 加一，返回事件使其减一。当深度回到 0 且已经积累事件时，表示当前最外层的**已观测调用**闭合：
 
 - 普通模式：立即打印这段事件序列并清空；
-- 聚类模式：按 LIFO 配对入口/返回，累计函数级统计后清空。
+- 聚合模式：按 LIFO 配对入口/返回，累计函数级统计后清空。
 
 这里维护的是“已挂载函数形成的观测栈”，不等价于 Go runtime 的完整物理调用栈。
 
@@ -445,9 +445,9 @@ EventManager
 
 `--drilldown` 只影响闭合后是否打印，不改变探针集合和内核采集范围。
 
-### 10.5 聚类模式
+### 10.5 聚合模式
 
-`--cluster` 不逐条打印调用栈，而是在每个 PID 内按函数名累计：
+`--aggregate` 不逐条打印调用栈，而是在每个 PID 内按函数名累计：
 
 - 调用次数；
 - `<=1us` 到 `<=10s` 以及 `>10s` 的固定延迟直方图；
@@ -459,9 +459,9 @@ EventManager
 
 所有模式（`--adaptive-sample=false` 时除外）每秒读取 Go `HeapAlloc`，以 `--memory-limit` 为目标，通过迟滞控制动态调整内核采样分母：达到 70%/85%/100% 时目标分母分别为 `8/64/1048576`，相同水位不会继续累乘；回落到 45% 后每秒减半直至恢复全采。采样率改变会写入 `sample_config_map`，后续 wanted 根调用立即使用新概率；已经准入的调用仍完整采完。
 
-动态采样是降低输入速率的闭环，不单独充当硬上限。每个内核采样根调用最多产生 4096 个事件，超限时发送 `TRACE_ABORT` 并回收状态，用于兜底 panic 跨帧、异常展开和超长调用。用户态另外把预算的四分之一按每事件 2048 字节的保守估算换算成未闭合事件上限；触顶时整段抑制该 `(pid, goid)` 直到 `TRACE_END`，若结束事件丢失则下一次 `TRACE_START` 会重置旧抑制。只有收到 `TRACE_END` 且入口/返回函数身份栈完全匹配的样本才会聚合（cluster 模式）。PID 状态最多保留 64 个进程，超过后 LRU 淘汰会丢弃该 PID 的未闭合栈/历史汇总并在输出中报告；抑制表最多 10000 项，返回值候选固定 64 项。这些边界共同保证所有模式下 go-ftrace 的可增长容器有界；非 cluster 模式退出时同样输出采样与丢失统计。这里限制的是 go-ftrace 自身数据结构，不是操作系统级 RSS/cgroup 硬限制。
+动态采样是降低输入速率的闭环，不单独充当硬上限。每个内核采样根调用最多产生 4096 个事件，超限时发送 `TRACE_ABORT` 并回收状态，用于兜底 panic 跨帧、异常展开和超长调用。用户态另外把预算的四分之一按每事件 2048 字节的保守估算换算成未闭合事件上限；触顶时整段抑制该 `(pid, goid)` 直到 `TRACE_END`，若结束事件丢失则下一次 `TRACE_START` 会重置旧抑制。只有收到 `TRACE_END` 且入口/返回函数身份栈完全匹配的样本才会聚合（aggregate 模式）。PID 状态最多保留 64 个进程，超过后 LRU 淘汰会丢弃该 PID 的未闭合栈/历史汇总并在输出中报告；抑制表最多 10000 项，返回值候选固定 64 项。这些边界共同保证所有模式下 go-ftrace 的可增长容器有界；非 aggregate 模式退出时同样输出采样与丢失统计。这里限制的是 go-ftrace 自身数据结构，不是操作系统级 RSS/cgroup 硬限制。
 
-统计默认每 5 秒输出一次累计快照，并在退出时输出最终结果。周期输出不清零。收到退出信号后先解除 links 停止生产，再排空 `event_queue`，最后读取累计丢失计数并打印，确保最终 observed 与运行统计覆盖同一批事件。`--cluster` 与 `--drilldown` 同时使用时，当前聚类路径不应用 drilldown 过滤。
+统计默认每 5 秒输出一次累计快照，并在退出时输出最终结果。周期输出不清零。收到退出信号后先解除 links 停止生产，再排空 `event_queue`，最后读取累计丢失计数并打印，确保最终 observed 与运行统计覆盖同一批事件。`--aggregate` 与 `--drilldown` 同时使用时，当前聚合路径不应用 drilldown 过滤。
 
 ## 11. 完整时序
 
@@ -488,13 +488,13 @@ sequenceDiagram
         EM->>EM: 按 pid/goid 配对、更新观测栈
         alt 深度归零且普通模式
             EM->>EM: 符号化并打印调用链
-        else 深度归零且聚类模式
+        else 深度归零且聚合模式
             EM->>EM: 累计耗时和返回值分布
         end
     end
 
     CLI->>BPF: Ctrl+C / context cancel
-    EM->>EM: 打印未闭合数据或最终聚类
+    EM->>EM: 打印未闭合数据或最终聚合
     BPF->>K: 关闭 links，解除探针
 ```
 
@@ -533,9 +533,9 @@ sequenceDiagram
 - `should_trace_ret`：10000 个 wanted 返回点；
 - `event_queue`：10000 条完整事件；
 - 每个 probe 最多 8 个抓取值；每个值包含 1 条寄存器基址规则和最多 7 步后续寻址；数据最多 64 字节；
-- cluster：最多 64 个 PID、每函数 64 个返回值重频候选、10000 个整段抑制状态，未闭合事件数由内存目标计算。
+- aggregate：最多 64 个 PID、每函数 64 个返回值重频候选、10000 个整段抑制状态，未闭合事件数由内存目标计算。
 
-queue 使用 `BPF_ANY` push。满载时保留已入队事件、拒绝新事件，并在 per-CPU `runtime_stats_map.dropped_events` 中精确累计失败次数；相比 `BPF_EXIST` 静默覆盖旧元素，这让事件损失可观测。高频调用或用户态处理阻塞仍可能形成孤立事件或未闭合观测栈。参数已内嵌，不会发生跨事件错配或等待参数卡死；cluster 要求 `TRACE_END` 和入口/返回函数身份栈同时完整，否则整段丢弃，并受未闭合事件硬上限保护。go-ftrace 是观测工具，不提供无损审计语义。
+queue 使用 `BPF_ANY` push。满载时保留已入队事件、拒绝新事件，并在 per-CPU `runtime_stats_map.dropped_events` 中精确累计失败次数；相比 `BPF_EXIST` 静默覆盖旧元素，这让事件损失可观测。高频调用或用户态处理阻塞仍可能形成孤立事件或未闭合观测栈。参数已内嵌，不会发生跨事件错配或等待参数卡死；aggregate 要求 `TRACE_END` 和入口/返回函数身份栈同时完整，否则整段丢弃，并受未闭合事件硬上限保护。go-ftrace 是观测工具，不提供无损审计语义。
 
 ### 12.5 运行开销
 
@@ -545,7 +545,7 @@ queue 使用 `BPF_ANY` push。满载时保留已入队事件、拒绝新事件�
 - eBPF map 查询、用户内存读取和 queue 写入；
 - 用户态符号化与终端输出。
 
-探针数量和命中频率比单个处理程序的代码量更影响整体成本。大范围 `-u`、自动抓取复杂结构体以及逐条输出都应谨慎用于高流量生产进程。高频场景优先使用 `--cluster`，并缩小函数匹配范围。
+探针数量和命中频率比单个处理程序的代码量更影响整体成本。大范围 `-u`、自动抓取复杂结构体以及逐条输出都应谨慎用于高流量生产进程。高频场景优先使用 `--aggregate`，并缩小函数匹配范围。
 
 ### 12.6 多进程语义
 
@@ -607,8 +607,8 @@ uprobe 挂在可执行文件 inode/offset 上，并未限定某个 PID；只要�
 | eBPF 内核程序与 maps | `internal/bpf/ftrace.c` |
 | BPF 加载、map 写入、attach、poll | `internal/bpf/bpf.go` |
 | PID/goid 状态与参数分发 | `internal/eventmanager/eventmanager.go` |
-| 事件状态机与聚类 | `internal/eventmanager/handler.go` |
-| 调用栈和聚类输出 | `internal/eventmanager/print.go` |
+| 事件状态机与聚合 | `internal/eventmanager/handler.go` |
+| 调用栈和聚合输出 | `internal/eventmanager/print.go` |
 
 ## 16. 延伸阅读
 

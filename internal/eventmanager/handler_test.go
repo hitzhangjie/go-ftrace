@@ -68,9 +68,10 @@ func TestRenderEventArgsRejectsCountMismatch(t *testing.T) {
 	}
 }
 
-func TestClusterRejectsMismatchedReturn(t *testing.T) {
+func TestAggregateRejectsMismatchedReturn(t *testing.T) {
 	m := &EventManager{
-		cluster:          true,
+		aggregate:        true,
+		adaptive:         true,
 		pids:             map[uint32]*pidState{},
 		suppressed:       map[traceKey]struct{}{},
 		maxPendingEvents: 16,
@@ -91,8 +92,8 @@ func TestClusterRejectsMismatchedReturn(t *testing.T) {
 	}
 }
 
-func TestNonClusterAdaptiveBackpressure(t *testing.T) {
-	// Non-cluster mode still runs the adaptive backpressure: root samples are
+func TestNonAggregateAdaptiveBackpressure(t *testing.T) {
+	// Non-aggregate mode still runs the adaptive backpressure: root samples are
 	// rejected once in-flight events exceed the budget, the rejected sample is
 	// suppressed until its root re-enters, and the whole sample is dropped.
 	m := &EventManager{
@@ -135,9 +136,34 @@ func TestNonClusterAdaptiveBackpressure(t *testing.T) {
 	}
 }
 
+func TestAggregateCloseStackWithoutAdaptiveUsesStackDepth(t *testing.T) {
+	// With --adaptive-sample=false the BPF side never emits TRACE_END, so
+	// aggregate mode must fall back to the stack-depth check: the aggregate is
+	// produced when the root call's stack unwinds back to zero.
+	m := &EventManager{
+		aggregate:  true, // adaptive=false by default
+		pids:       map[uint32]*pidState{},
+		suppressed: map[traceKey]struct{}{},
+	}
+	s := m.pidState(1)
+
+	entry := bpf.GoftraceEvent{Pid: 1, Goid: 2, Ip: 0x100, Location: eventLocationEntry}
+	m.updateObservedStack(s, entry, uprobe.Uprobe{Address: 0x100})
+	s.goEvents[2] = []Event{{GoftraceEvent: entry}}
+	if m.CloseStack(entry) {
+		t.Fatal("open stack must not close the sample")
+	}
+
+	ret := bpf.GoftraceEvent{Pid: 1, Goid: 2, Ip: 0x100, Location: eventLocationRet}
+	m.updateObservedStack(s, ret, uprobe.Uprobe{Address: 0x100})
+	if !m.CloseStack(ret) {
+		t.Fatal("stack unwound to zero must close the sample")
+	}
+}
+
 func TestTraceStartResetsIncompletePreviousSample(t *testing.T) {
 	m := &EventManager{
-		cluster:          true,
+		aggregate:        true,
 		pids:             map[uint32]*pidState{},
 		suppressed:       map[traceKey]struct{}{},
 		maxPendingEvents: 16,
@@ -157,10 +183,10 @@ func TestTraceStartResetsIncompletePreviousSample(t *testing.T) {
 	}
 }
 
-func TestRecordClusterAccumulatesObservedAndEstimatedCounts(t *testing.T) {
+func TestRecordAggAccumulatesObservedAndEstimatedCounts(t *testing.T) {
 	s := newPidState()
-	s.recordCluster("main.hot", 5, "ok", 8)
-	s.recordCluster("main.hot", 5, "ok", 64)
+	s.recordAgg("main.hot", 5, "ok", 8)
+	s.recordAgg("main.hot", 5, "ok", 64)
 
 	agg := s.agg["main.hot"]
 	if agg.calls != 2 || agg.weightedCalls != 72 {
@@ -176,15 +202,15 @@ func TestRecordClusterAccumulatesObservedAndEstimatedCounts(t *testing.T) {
 
 func TestRecordRetvalUsesBoundedHeavyHitters(t *testing.T) {
 	agg := newFuncAgg()
-	for i := 0; i < maxClusterRetvals*4; i++ {
+	for i := 0; i < maxAggregateRetvals*4; i++ {
 		agg.recordRetval(string(rune(i+1)), 1)
 	}
 	for i := 0; i < 1000; i++ {
 		agg.recordRetval("hot", 1)
 	}
 
-	if len(agg.retvals) != maxClusterRetvals {
-		t.Fatalf("retvals size=%d, want %d", len(agg.retvals), maxClusterRetvals)
+	if len(agg.retvals) != maxAggregateRetvals {
+		t.Fatalf("retvals size=%d, want %d", len(agg.retvals), maxAggregateRetvals)
 	}
 	if count, ok := agg.retvals["hot"]; !ok || count.count < 1000 {
 		t.Fatalf("hot value missing or under-counted: %+v, present=%v", count, ok)
@@ -193,7 +219,7 @@ func TestRecordRetvalUsesBoundedHeavyHitters(t *testing.T) {
 
 func TestRecordRetvalReplacementKeepsObservedLowerBound(t *testing.T) {
 	agg := newFuncAgg()
-	for i := 0; i < maxClusterRetvals; i++ {
+	for i := 0; i < maxAggregateRetvals; i++ {
 		agg.recordRetval(string(rune(i+1)), 8)
 	}
 	agg.recordRetval("replacement", 64)

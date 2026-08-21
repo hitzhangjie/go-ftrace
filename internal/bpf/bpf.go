@@ -168,7 +168,7 @@ func (b *BPF) setWantedRet(retAddress, entryAddress uint64) error {
 	return b.objs.ShouldTraceRet.Update(retAddress, entryAddress, ebpf.UpdateNoExist)
 }
 
-// SetSampleDenominator updates the cluster-mode sampling probability. A value
+// SetSampleDenominator updates the sampling probability. A value
 // of N admits approximately one out of every N wanted root calls.
 func (b *BPF) SetSampleDenominator(denominator uint32) error {
 	if denominator == 0 {
