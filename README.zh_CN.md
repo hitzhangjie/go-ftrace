@@ -10,9 +10,11 @@ go-ftrace 是一个基于Linux bpf(2) 的类似内核工具 ftrace(1) 的函数�
 
 # 使用方式
 
-项目中提供了测试程序 `examples/main.go` ，可以执行如下几种测试来了解go-ftrace的使用:
+项目中提供了测试程序（`examples/trace_funcs`、`testdata/args`、`testdata/rets`），可以执行如下几种测试来了解 go-ftrace 的使用。
 
-  ```
+跟踪函数：
+
+```
   示例1: 跟踪一个自定义函数 main.add:
     ftrace -u main.add ./main
 
@@ -22,20 +24,12 @@ go-ftrace 是一个基于Linux bpf(2) 的类似内核工具 ftrace(1) 的函数�
   示例3: 跟踪多个模式匹配的函数 main.add* 或 main.minus*:
     ftrace -u 'main.add*' -u 'main.minus*' ./main
 
-  示例4: 跟踪一个自定义函数 "main.add 以及 内置函数 runtime.chan*:
+  示例4: 跟踪一个自定义函数 main.add 以及内置函数 runtime.chan*:
     ftrace -u 'main.add' -u 'runtime.chan*' ./main
 
   示例5: 跟踪一个自定义类型的方法:
-    ftrace -u 'main.(*Student).String ./main    
-
-  示例6: 跟踪一个自定义类型的方法，并试图提取关心的参数:
-    ftrace -u 'main.(*Student).String' ./main \
-      --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
-
-  示例7: 在函数返回点提取返回值:
-    ftrace -u 'main.(*serviceMesh).send' ./main \
-      --frets 'main.(*serviceMesh).send(Code=(+0(%ax)):s64, Detail.itab=(+8(%ax)):u64, Detail.data=(+16(%ax)):u64)'
-  ```
+    ftrace -u 'main.(*Student).String' ./main
+```
 
 高频函数建议使用 aggregate 模式，并设置 go-ftrace 的堆内存目标：
 
@@ -49,29 +43,60 @@ sudo ftrace -c --memory-limit 256 -u 'main.hotPath' ./main
 
 ps: 你可以在启动被测试程序 ./main 之前或者之后启动 ftrace，两种方式都可以正常工作，这主要是跟ebpf程序的加载、触发机制有关。
 
-## 自动提取函数参数与返回值
+## 自动提取函数参数与返回值（默认）
 
-示例6、示例7 展示了如何通过 `--fargs` / `--frets` 手动指定要提取的参数和返回值。
-对于常见的 Go 类型（整数、指针、字符串、切片、接口，以及指向结构体的指针等），
-ftrace 现在可以从 DWARF 调试信息中自动推导出对应的提取规则，无需再手写表达式：
+自动提取**默认开启**。ftrace 读 DWARF、编译抓取规则，在 uprobe 命中当下拷贝，再打印成接近 Go 的结构化值。常见类型（整数、布尔、字符串、切片、结构体指针、接口）不需要 `--fargs` / `--frets`。
+
+先编译 fixture（`make -C testdata`）：
 
 ```bash
-# 无需 --fargs / --frets，自动提取 main.(*Student).String 的参数与返回值
-sudo ftrace -u 'main.(*Student).String' ./main
+sudo ftrace -u 'main.add' ./testdata/args/main
 ```
 
-自动推导默认开启，且入参与返回值可分别独立控制（`--fargs-auto` 与 `--frets-auto`）。它从 DWARF 恢复函数签名和 Go 类型树，再依据当前支持的 Go amd64 寄存器 ABI 推导值的位置：
+```text
+22 12:24:47.9955           main.add(a=1, b=2) { main.main+134 testdata/args/main.go:27
+22 12:24:47.9955 000.0000  } main.add+38 => ret0=3 testdata/args/main.go:47
+```
 
-- 标量按声明顺序映射到 `ax, bx, cx, di, si, r8...` 等整数寄存器；
-- 字符串展开为 `.data`（最多读取 64 字节）与 `.len`；
-- 切片展开为 `.data / .len / .cap`，当前不读取元素；
-- 接口额外采集运行时类型和值前缀，以尽力还原具体动态值；
-- 指向结构体的指针会解引用并按 DWARF 字段偏移递归展开；
-- 返回值同样按返回顺序从 `ax` 开始映射（`~r0/ret0`、`~r1/ret1` …）。
+```bash
+sudo ftrace -u 'main.(*Student).String' ./testdata/args/main
+```
 
-命令行显式出现任意 `--fargs` 时，本次运行的入口 auto 会整体关闭；显式出现任意 `--frets` 时，返回 auto 会整体关闭。两个方向互不影响。如需主动关闭，可分别传入 `--fargs-auto=false` 或 `--frets-auto=false`。
+```text
+22 12:25:14.0021           main.(*Student).String(s=&main.Student{Name:"zhang", Age:100}) { main.main+165 testdata/args/main.go:29
+22 12:25:14.0021 000.0000  } main.(*Student).String+349 => ret0="" testdata/args/main.go:70
+```
 
-详细原理、类型展开方式、接口动态值还原及适用边界见 [Auto 模式原理：从 DWARF 类型到运行时参数值](./docs/AutoFetch.zh_CN.md)。
+```bash
+sudo ftrace -u 'main.send' ./testdata/rets/main
+```
+
+```text
+22 12:25:21.5756           main.send(ok=true) { main.main+156 testdata/rets/main.go:32
+22 12:25:21.5756 000.0000  } main.send+149 => ret0=nil testdata/rets/main.go:121
+22 12:25:21.5756           main.send(ok=false) { main.main+165 testdata/rets/main.go:33
+22 12:25:21.5756 000.0000  } main.send+282 => ret0=&main.MeshError{Code:500, Detail:&errors.errorString{s:"<unavailable>"}} testdata/rets/main.go:119
+22 12:25:22.1226           main.send(ok=false) { main.main+165 testdata/rets/main.go:33
+22 12:25:22.1226 000.0000  } main.send+282 => ret0=&main.MeshError{Code:500, Detail:&errors.errorString{s:"send failed"}} testdata/rets/main.go:119
+```
+
+`--fargs-auto` / `--frets-auto` 可分别关闭。nil 的 `error` 显示为 `nil`。某种接口具体类型第一次出现时，嵌套字节（例如 `error` 里的字符串）可能是 `<unavailable>`，同类型后续命中会拷全。原理见 [Auto 模式原理：从 DWARF 类型到探针时快照](./docs/AutoFetch.zh_CN.md)。
+
+## 手写 fetch 规则（可选）
+
+手写 `--fargs` / `--frets` 适合 auto 太吵的时候：只要某一个字段、聚合直方图更干净，或 auto 覆盖不了的布局。命令行出现任意 `--fargs` 时，本次运行的入口 auto 整体关闭；出现任意 `--frets` 时，返回 auto 整体关闭。
+
+```bash
+sudo ftrace -u 'main.add' ./testdata/args/main \
+  --fargs 'main.add(a=(%ax):s64, b=(%bx):s64)'
+```
+
+```text
+22 12:27:15.0151           main.add(a=1, b=2) { main.main+134 testdata/args/main.go:27
+22 12:27:15.0151 000.0000  } main.add+38 => ret0=3 testdata/args/main.go:47
+```
+
+规则语法见 [FetchArgRule.zh_CN.md](./docs/FetchArgRule.zh_CN.md)，现成例子见 [FetchArgExamples.zh_CN.md](./docs/FetchArgExamples.zh_CN.md)。
 
 # 安装方法
 
@@ -102,7 +127,7 @@ make install
 
 你可以将其用于go程序的函数调用关系的跟踪，以及耗时相关的统计观测。
 
-以下面的示例代码为例（详见 `examples/main.go`），说明下工具的使用、执行效果：
+以下面的示例代码为例（详见 `examples/trace_funcs/main.go`），说明下工具的使用、执行效果：
 
 ```go
 func main() {
@@ -124,57 +149,47 @@ func doSomething() {
 }
 ```
 
-如果我们要观察函数 `doSomething` 执行过程中的函数调用关系，以及耗时情况，我们可以这样做：
+如果我们要观察 `doSomething` 的调用关系和耗时，默认的自动提取就够了，不必手写 `--fargs`：
 
 ```bash
-sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main \
-  --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main
 ```
 
-`ftrace` 将输出如下信息，从中可以看到：
+从输出里可以看到：
 
-- 函数启动、停止时的绝对时间
-- 函数执行的耗时信息，单位“秒(s)”
-- 函数定义所在的源码位置
-- 函数被发起调用时的位置
-- 函数指令数据末尾的偏移量
-- 想获取的函数参数信息
+- 整棵调用树：谁在何时调用了谁
+- 每一层的入参与返回值（DWARF 自动推导，不必手写规则）
+- 每一层返回时的耗时（秒），会沿着栈往上累加
+- 方法接收者被还原成结构体
+- 同一二进制里其他 goroutine 的调用也会出现
 
-```bash
-$ sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
-WARN[0000] skip main.main, failed to get ret offsets: no ret offsets 
-found 14 uprobes, large number of uprobes (>1000) need long time for attaching and detaching, continue? [Y/n]
+```text
+                           🔬 嵌套调用：谁调用了谁，以及每一层的参数和返回值
+22 12:31:44.0081           main.doSomething() { main.main+31 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:16
+22 12:31:44.0081             main.add(a=1, b=2) { main.doSomething+37 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:21
+22 12:31:44.0081               main.add1(a=1, b=2) { main.add+151 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:33
+22 12:31:44.1083                 main.add2(a=1, b=2) { main.add1+165 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:40
+22 12:31:44.3087                   main.add3(a=1, b=2) { main.add2+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:48
 
->>> press `y` to continue
-y
-add arg rule at 47cc40: {Type:1 Reg:0 Size:8 Length:1 Offsets:[0 0 0 0 0 0 0 0] Deference:[1 0 0 0 0 0 0 0]}
-add arg rule at 47cc40: {Type:1 Reg:0 Size:8 Length:1 Offsets:[8 0 0 0 0 0 0 0] Deference:[0 0 0 0 0 0 0 0]}
-add arg rule at 47cc40: {Type:1 Reg:0 Size:8 Length:1 Offsets:[16 0 0 0 0 0 0 0] Deference:[0 0 0 0 0 0 0 0]}
-INFO[0002] start tracing                                
-...
-                           🔬 You can inspect all nested function calls, when and where started or finished
-23 17:11:00.0890           main.doSomething() { main.main+15 /home/zhangjie/github/go-ftrace/examples/main.go:10
-23 17:11:00.0890             main.add() { main.doSomething+37 /home/zhangjie/github/go-ftrace/examples/main.go:15
-23 17:11:00.0890               main.add1() { main.add+149 /home/zhangjie/github/go-ftrace/examples/main.go:27
-23 17:11:00.0890                 main.add3() { main.add1+149 /home/zhangjie/github/go-ftrace/examples/main.go:40
-23 17:11:00.0890 000.0000        } main.add3+148 /home/zhangjie/github/go-ftrace/examples/main.go:46
-23 17:11:00.0890 000.0000      } main.add1+154 /home/zhangjie/github/go-ftrace/examples/main.go:33
-23 17:11:00.0890 000.0001    } main.add+154 /home/zhangjie/github/go-ftrace/examples/main.go:27
-23 17:11:00.0890             main.minus() { main.doSomething+52 /home/zhangjie/github/go-ftrace/examples/main.go:16
-23 17:11:00.0890 000.0000    } main.minus+3 /home/zhangjie/github/go-ftrace/examples/main.go:51
+                                 ⏱️ 每一层返回时打出耗时，会沿着调用栈往上累加
+22 12:31:44.6092 000.3005          } main.add3+175 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:55
+22 12:31:44.6092 000.5009        } main.add2+57 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:48
+22 12:31:44.6092 000.6011      } main.add1+170 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:40
+22 12:31:44.6092 000.6011    } main.add+156 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:33
+22 12:31:44.6092             main.minus(a=1, b=2) { main.doSomething+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:22
+22 12:31:44.6594 000.0502    } main.minus+55 => ret0=-1 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:61
 
-                            🔍 Here, member fields of function receiver extracted, receiver is the 1st argument actually.
-23 17:11:00.0891             main.(*Student).String(s.name=zhang<ni, s.name.len=5, s.age=100) { fmt.(*pp).handleMethods+690 /opt/go/src/fmt/print.go:673
-23 17:11:00.0891 000.0000    } main.(*Student).String+138 /home/zhangjie/github/go-ftrace/examples/main.go:64
-23 17:11:01.0895 001.0005  } main.doSomething+180 /home/zhangjie/github/go-ftrace/examples/main.go:22
-                 ⏱️ Here, timecost is displayed at the end of the function call
-...
+                            🔍 接收者由 DWARF 自动推导（*Student 在 AX，展开成结构体）
+22 12:31:44.6594             main.(*Student).String(s=&main.Student{name:"zhang", age:100}) { fmt.(*pp).handleMethods+756 /opt/go/src/fmt/print.go:674
+22 12:31:44.6695 000.0101    } main.(*Student).String+156 => ret0="" /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:75
+22 12:31:45.6699 001.6618  } main.doSomething+172 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:28
 
->>> press `Ctrl+C` to quit.
-
-INFO[0007] start detaching                              
-detaching 16/16
+                           🧵 同一二进制里另一个 goroutine（main 里那段循环）
+22 12:31:45.8854           main.add3(a=1, b=1) { main.main.func1+37 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:12
+22 12:31:46.1860 000.3006  } main.add3+175 => ret0=2 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:55
 ```
+
+只有在你只关心某几个字段（例如让聚合直方图更干净）时，才需要手写 `--fargs` / `--frets`。
 
 # 设计实现
 

@@ -3,10 +3,11 @@
 go-ftrace is an bpf(2)-based ftrace(1)-like function graph tracer for Golang processes.
 
 **Limits: for now, only support following cases**
+
 - OS: Linux, with support for bpf(2) and uprobe
 - Arch: x86-64 little endian
 - Binary: go ELF executable, non-stripped, built with non-PIE mode,
-          ELF sections .symtab, .(z)debug_info are required
+  ELF sections .symtab, .(z)debug_info are required
 
 # Usage
 
@@ -16,7 +17,7 @@ go-ftrace is an bpf(2)-based ftrace(1)-like function graph tracer for Golang pro
 
 Check `examples/trace_funcs`, try following tracing tests:
 
-  ```
+```
   example: trace a specific function: "main.add":
     ftrace -u main.add ./main
 
@@ -30,66 +31,76 @@ Check `examples/trace_funcs`, try following tracing tests:
     ftrace -u 'main.add' -u 'runtime.chan*' ./main
 
   example: trace a specific method of specific type:
-    ftrace -u 'main.(*Student).String ./main    
-  ```
-
-## Trace functions and arguments
-
-Check `examples/trace_funcs_arguments`, try following tracing tests:
-
-  ```
-  example: trace a specific method of specific type, and fetch its receiver argument:
-    ftrace -u 'main.(*Student).String' ./main \
-      --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
-  
-  example: trace a specific method of specific type, and fetch its arguments list:
-    ftrace -u 'main.(*Student).BuyBook' ./main \
-      --fargs 'main.(*Student).BuyBook(s.book=(+0(%bx)):c128, s.book.len=(%cx):s64, s.num=(%di):s64)'
-  ```
-
-## Trace return values
-
-Use `--frets` to fetch return values at the function's RET point:
-
-  ```
-  example: fetch a function's return value:
-    ftrace -u 'main.add' ./main \
-      --frets 'main.add(result=(%ax):s64)'
-
-  example: fetch fields of a returned pointer:
-    ftrace -u 'main.(*serviceMesh).send' ./main \
-      --frets 'main.(*serviceMesh).send(Code=(+0(%ax)):s64, Detail.itab=(+8(%ax)):u64, Detail.data=(+16(%ax)):u64)'
-  ```
-
->ps: `Makefile` is provided, you can run `make <target>` to quickly test it.
->
-> And tracing by ftrace can be done either before or after launching ./main, both approaches will work.
-
-## Automatic argument / return-value fetching
-
-The examples above show how to fetch arguments (`--fargs`) and return values
-(`--frets`) by writing expressions manually. For common Go types (integers,
-pointers, strings, slices, interfaces, and pointers to structs), ftrace can
-now derive those rules automatically from DWARF debug info:
-
-```bash
-# no --fargs / --frets needed: ftrace derives them automatically
-sudo ftrace -u 'main.(*Student).String' ./main
+    ftrace -u 'main.(*Student).String' ./main
 ```
 
-Automatic fetching is on by default, and arguments and return values can be
-toggled independently via `--fargs-auto` and `--frets-auto`:
+## Fetch arguments and return values (automatic, default)
 
-- arguments map to registers `ax, bx, cx, di, si, r8, ...` in declaration order, following Go's register ABI (regabi);
-- strings expand to `.data` (read as `c64`) and `.len`;
-- slices expand to `.data / .len / .cap`;
-- interfaces expand to `.itab / .data`;
-- pointers to structs are dereferenced and their fields flattened;
-- return values map to registers in return order (`ret0`, `ret1`, ...).
+Auto fetching is **on by default**. ftrace reads DWARF, compiles fetch rules,
+copies values when the uprobe fires, and prints them as Go-like structured
+values. You do not need `--fargs` / `--frets` for common types (integers,
+bools, strings, slices, pointers to structs, interfaces).
 
-Explicit `--fargs` / `--frets` rules always take precedence and are never
-overwritten. Disable automatic derivation with `--fargs-auto=false` and/or
-`--frets-auto=false`.
+Build the fixtures once (`make -C testdata`), then:
+
+```bash
+sudo ftrace -u 'main.add' ./testdata/args/main
+```
+
+```text
+22 12:24:47.9955           main.add(a=1, b=2) { main.main+134 testdata/args/main.go:27
+22 12:24:47.9955 000.0000  } main.add+38 => ret0=3 testdata/args/main.go:47
+```
+
+```bash
+sudo ftrace -u 'main.(*Student).String' ./testdata/args/main
+```
+
+```text
+22 12:25:14.0021           main.(*Student).String(s=&main.Student{Name:"zhang", Age:100}) { main.main+165 testdata/args/main.go:29
+22 12:25:14.0021 000.0000  } main.(*Student).String+349 => ret0="" testdata/args/main.go:70
+```
+
+```bash
+sudo ftrace -u 'main.send' ./testdata/rets/main
+```
+
+```text
+22 12:25:21.5756           main.send(ok=true) { main.main+156 testdata/rets/main.go:32
+22 12:25:21.5756 000.0000  } main.send+149 => ret0=nil testdata/rets/main.go:121
+22 12:25:21.5756           main.send(ok=false) { main.main+165 testdata/rets/main.go:33
+22 12:25:21.5756 000.0000  } main.send+282 => ret0=&main.MeshError{Code:500, Detail:&errors.errorString{s:"<unavailable>"}} testdata/rets/main.go:119
+22 12:25:22.1226           main.send(ok=false) { main.main+165 testdata/rets/main.go:33
+22 12:25:22.1226 000.0000  } main.send+282 => ret0=&main.MeshError{Code:500, Detail:&errors.errorString{s:"send failed"}} testdata/rets/main.go:119
+```
+
+`--fargs-auto` / `--frets-auto` can be turned off independently. A nil `error`
+prints as `nil`. The first hit of a new interface concrete type may show
+`<unavailable>` for nested bytes (the string inside `error`); the same type
+is captured in full on later hits. Details: [Auto-fetch design](./docs/AutoFetch.zh_CN.md).
+
+## Manual fetch rules (optional)
+
+Hand-written `--fargs` / `--frets` are for when auto is too noisy: you only
+want one field, cleaner aggregate histograms, or a layout auto does not
+cover. Any `--fargs` on the command line turns off entry auto for the whole
+run; any `--frets` turns off return auto.
+
+```bash
+sudo ftrace -u 'main.add' ./testdata/args/main \
+  --fargs 'main.add(a=(%ax):s64, b=(%bx):s64)'
+```
+
+```text
+22 12:27:15.0151           main.add(a=1, b=2) { main.main+134 testdata/args/main.go:27
+22 12:27:15.0151 000.0000  } main.add+38 => ret0=3 testdata/args/main.go:47
+```
+
+Rule syntax: [FetchArgRule.md](./docs/FetchArgRule.md). Ready-made examples:
+[FetchArgExamples.md](./docs/FetchArgExamples.md).
+
+> `Makefile`s under `examples/` and `testdata/` let you `make <target>` quickly.
+> Tracing can start before or after `./main`; both work.
 
 # Installation
 
@@ -123,7 +134,8 @@ Alternatively, apply those settings manually as described in
 - Wall time profiling;
 - Execution flow observing;
 
-Here's an example when tracing `examples/main.go`, here's the code snippet:
+Here's an example when tracing `examples/trace_funcs/main.go`, here's the code snippet:
+
 ```go
 func main() {
 	for {
@@ -144,53 +156,47 @@ func doSomething() {
 }
 ```
 
-if we want to observing the details of `doSomething`, we can trace like ths:
+If we want to observe `doSomething`, auto-fetch is enough — no `--fargs`:
 
 ```bash
-sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main \
-  --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
+sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main
 ```
 
-ftrace will output the details:
+The output shows:
 
-```bash
-$ sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main --fargs 'main.(*Student).String(s.name=(*+0(%ax)):c64, s.name.len=(+8(%ax)):s64, s.age=(+16(%ax)):s64)'
-WARN[0000] skip main.main, failed to get ret offsets: no ret offsets 
-found 14 uprobes, large number of uprobes (>1000) need long time for attaching and detaching, continue? [Y/n]
+- the full call tree: who called whom and when
+- arguments and return values on every frame (from DWARF, no hand-written rules)
+- per-frame latency in seconds, accumulating as the stack unwinds
+- method receivers reconstructed as structs
+- calls from other goroutines of the same binary
 
->>> press `y` to continue
-y
-add arg rule at 47cc40: {Type:1 Reg:0 Size:8 Length:1 Offsets:[0 0 0 0 0 0 0 0] Deference:[1 0 0 0 0 0 0 0]}
-add arg rule at 47cc40: {Type:1 Reg:0 Size:8 Length:1 Offsets:[8 0 0 0 0 0 0 0] Deference:[0 0 0 0 0 0 0 0]}
-add arg rule at 47cc40: {Type:1 Reg:0 Size:8 Length:1 Offsets:[16 0 0 0 0 0 0 0] Deference:[0 0 0 0 0 0 0 0]}
-INFO[0002] start tracing                                
+```text
+                           🔬 Nested calls: who called whom, args, and return values
+22 12:31:44.0081           main.doSomething() { main.main+31 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:16
+22 12:31:44.0081             main.add(a=1, b=2) { main.doSomething+37 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:21
+22 12:31:44.0081               main.add1(a=1, b=2) { main.add+151 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:33
+22 12:31:44.1083                 main.add2(a=1, b=2) { main.add1+165 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:40
+22 12:31:44.3087                   main.add3(a=1, b=2) { main.add2+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:48
+                                
+                                  ⏱️ Latency stacks up as each frame returns
+22 12:31:44.6092 000.3005          } main.add3+175 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:55
+22 12:31:44.6092 000.5009        } main.add2+57 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:48
+22 12:31:44.6092 000.6011      } main.add1+170 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:40
+22 12:31:44.6092 000.6011    } main.add+156 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:33
+22 12:31:44.6092             main.minus(a=1, b=2) { main.doSomething+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:22
+22 12:31:44.6594 000.0502    } main.minus+55 => ret0=-1 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:61
 
-...
+                            🔍 Receiver reconstructed from DWARF (*Student in AX)
+22 12:31:44.6594             main.(*Student).String(s=&main.Student{name:"zhang", age:100}) { fmt.(*pp).handleMethods+756 /opt/go/src/fmt/print.go:674
+22 12:31:44.6695 000.0101    } main.(*Student).String+156 => ret0="" /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:75
+22 12:31:45.6699 001.6618  } main.doSomething+172 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:28
 
-                           🔬 You can inspect all nested function calls, when and where started or finished
-23 17:11:00.0890           main.doSomething() { main.main+15 /home/zhangjie/github/go-ftrace/examples/main.go:10
-23 17:11:00.0890             main.add() { main.doSomething+37 /home/zhangjie/github/go-ftrace/examples/main.go:15
-23 17:11:00.0890               main.add1() { main.add+149 /home/zhangjie/github/go-ftrace/examples/main.go:27
-23 17:11:00.0890                 main.add3() { main.add1+149 /home/zhangjie/github/go-ftrace/examples/main.go:40
-23 17:11:00.0890 000.0000        } main.add3+148 /home/zhangjie/github/go-ftrace/examples/main.go:46
-23 17:11:00.0890 000.0000      } main.add1+154 /home/zhangjie/github/go-ftrace/examples/main.go:33
-23 17:11:00.0890 000.0001    } main.add+154 /home/zhangjie/github/go-ftrace/examples/main.go:27
-23 17:11:00.0890             main.minus() { main.doSomething+52 /home/zhangjie/github/go-ftrace/examples/main.go:16
-23 17:11:00.0890 000.0000    } main.minus+3 /home/zhangjie/github/go-ftrace/examples/main.go:51
-
-                            🔍 Here, member fields of function receiver extracted, receiver is the 1st argument actually.
-23 17:11:00.0891             main.(*Student).String(s.name=zhang<ni, s.name.len=5, s.age=100) { fmt.(*pp).handleMethods+690 /opt/go/src/fmt/print.go:673
-23 17:11:00.0891 000.0000    } main.(*Student).String+138 /home/zhangjie/github/go-ftrace/examples/main.go:64
-23 17:11:01.0895 001.0005  } main.doSomething+180 /home/zhangjie/github/go-ftrace/examples/main.go:22
-                 ⏱️ Here, timecost is displayed at the end of the function call
-
-...
-
->>> press `Ctrl+C` to quit.
-
-INFO[0007] start detaching                              
-detaching 16/16
+                           🧵 Same binary, another goroutine (the loop in main)
+22 12:31:45.8854           main.add3(a=1, b=1) { main.main.func1+37 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:12
+22 12:31:46.1860 000.3006  } main.add3+175 => ret0=2 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:55
 ```
+
+Hand-write `--fargs` / `--frets` only if you want a subset of fields (for example a smaller aggregate histogram).
 
 # Design & Implemention
 
@@ -198,10 +204,11 @@ If you're interested in the implmention internals, please read: [go-ftrace inter
 
 # Acknowledgments
 
-This repo is forked from [jschwinger233/gofuncgraph](https://github.com/jschwinger233/gofuncgraph), with some modifications to improve usability and fix the bugs of fetching arguments. 
+This repo is forked from [jschwinger233/gofuncgraph](https://github.com/jschwinger233/gofuncgraph), with some modifications to improve usability and fix the bugs of fetching arguments.
 
 Thanks for the original work!
 
-ps：if you want to know more about go-ftrace alternatives to C, C++, Rust and Python, or kernel ftrace tool, you can see: 
+ps：if you want to know more about go-ftrace alternatives to C, C++, Rust and Python, or kernel ftrace tool, you can see:
+
 - [namhyung/uftrace](https://github.com/namhyung/uftrace), https://github.com/namhyung/uftrace
 - [kernel ftrace](https://www.kernel.org/doc/html/v4.17/trace/ftrace.html), https://www.kernel.org/doc/html/v4.17/trace/ftrace.html
