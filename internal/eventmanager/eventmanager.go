@@ -1,6 +1,7 @@
 package eventmanager
 
 import (
+	"debug/dwarf"
 	"errors"
 	"fmt"
 	"sync"
@@ -74,6 +75,22 @@ type EventManager struct {
 	suppressed        map[traceKey]struct{}
 
 	bootTime time.Time
+
+	learnType   func(uint64, dwarf.Type) error
+	typeRecipes map[uint64][]uprobe.RelRule
+	learned     map[uint64]bool
+}
+
+// SetTypeLearner registers a callback that installs extra probe-time copies
+// for a newly observed interface concrete type (keyed by runtime type address).
+func (m *EventManager) SetTypeLearner(fn func(uint64, dwarf.Type) error) {
+	m.learnType = fn
+	if m.typeRecipes == nil {
+		m.typeRecipes = map[uint64][]uprobe.RelRule{}
+	}
+	if m.learned == nil {
+		m.learned = map[uint64]bool{}
+	}
 }
 
 // pidState holds the complete goroutine-local tracing state of a single
@@ -219,15 +236,17 @@ func New(uprobes []uprobe.Uprobe, elf *elf.ELF, drilldown, trimprefix string, ag
 		uprobesMap[fmt.Sprintf("%s+%d", up.Funcname, up.RelOffset)] = up
 	}
 	m := &EventManager{
-		elf:        elf,
-		uprobes:    uprobesMap,
-		drilldown:  drilldown,
-		trimprefix: trimprefix,
-		aggregate:  aggregate,
-		adaptive:   adaptive,
-		pids:       map[uint32]*pidState{},
-		suppressed: map[traceKey]struct{}{},
-		bootTime:   bootTime,
+		elf:         elf,
+		uprobes:     uprobesMap,
+		drilldown:   drilldown,
+		trimprefix:  trimprefix,
+		aggregate:   aggregate,
+		adaptive:    adaptive,
+		pids:        map[uint32]*pidState{},
+		suppressed:  map[traceKey]struct{}{},
+		bootTime:    bootTime,
+		typeRecipes: map[uint64][]uprobe.RelRule{},
+		learned:     map[uint64]bool{},
 	}
 	if adaptive {
 		m.maxPendingEvents = memoryLimit / aggEventBudgetDiv / estimatedEventBytes

@@ -1,15 +1,13 @@
 package eventmanager
 
 import (
-	"fmt"
+	"encoding/binary"
 	"strings"
 	"time"
-	"unsafe"
 
 	"github.com/hitzhangjie/go-ftrace/internal/bpf"
 	up "github.com/hitzhangjie/go-ftrace/internal/uprobe"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sys/unix"
 )
 
 // Handle handles the event
@@ -116,8 +114,6 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) bool {
 		log.Errorf("failed to get uprobe for event %+v: %+v", event, err)
 		return false
 	}
-	up.BindInterfaceMemory(probe.Values, processMemoryReader(event.Pid))
-
 	s := m.pidState(event.Pid)
 	length := len(s.goEvents[event.Goid])
 	if length == 0 {
@@ -142,7 +138,8 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) bool {
 		}
 	}
 
-	argString := renderEventArgs(probe, event)
+	argString := renderEventArgsRecipes(probe, event, m.typeRecipes)
+	m.learnInterfaceTypes(probe, event)
 	s.goEvents[event.Goid] = append(s.goEvents[event.Goid], Event{
 		GoftraceEvent: event,
 		uprobe:        &probe,
@@ -170,10 +167,14 @@ func (m *EventManager) updateObservedStack(s *pidState, event bpf.GoftraceEvent,
 }
 
 func renderEventArgs(uprobe up.Uprobe, event bpf.GoftraceEvent) string {
+	return renderEventArgsRecipes(uprobe, event, nil)
+}
+
+func renderEventArgsRecipes(uprobe up.Uprobe, event bpf.GoftraceEvent, recipes map[uint64][]up.RelRule) string {
 	expected := len(uprobe.FetchArgs)
 	actual := int(event.ArgCount)
-	if actual != expected || actual > len(event.Args) {
-		log.Warnf("drop arguments for %s: event contains %d leaves, expected %d", uprobe.Funcname, actual, expected)
+	if actual < expected || actual > len(event.Args) {
+		log.Warnf("drop arguments for %s: event contains %d leaves, expected at least %d", uprobe.Funcname, actual, expected)
 		return "<unavailable>"
 	}
 
@@ -188,7 +189,7 @@ func renderEventArgs(uprobe up.Uprobe, event bpf.GoftraceEvent) string {
 	}
 
 	if len(uprobe.Values) > 0 {
-		return up.RenderValues(uprobe.Values, leafData)
+		return up.RenderValuesRecipes(uprobe.Values, leafData, recipes)
 	}
 
 	args := make([]string, 0, actual)
@@ -205,22 +206,37 @@ func renderEventArgs(uprobe up.Uprobe, event bpf.GoftraceEvent) string {
 	return strings.Join(args, "")
 }
 
-func processMemoryReader(pid uint32) func(uint64, []byte) error {
-	return func(addr uint64, dst []byte) error {
-		if len(dst) == 0 {
-			return nil
+func (m *EventManager) learnInterfaceTypes(probe up.Uprobe, event bpf.GoftraceEvent) {
+	if m.learnType == nil || m.elf == nil {
+		return
+	}
+	n := int(event.ArgCount)
+	if n > len(event.Args) {
+		n = len(event.Args)
+	}
+	if n > len(probe.FetchArgs) {
+		n = len(probe.FetchArgs)
+	}
+	for _, a := range probe.FetchArgs {
+		if !a.IfaceData || a.TypeIndex < 0 || a.TypeIndex >= n {
+			continue
 		}
-		local := unix.Iovec{Base: (*byte)(unsafe.Pointer(&dst[0]))}
-		local.SetLen(len(dst))
-		n, err := unix.ProcessVMReadv(int(pid), []unix.Iovec{local}, []unix.RemoteIovec{{Base: uintptr(addr), Len: len(dst)}}, 0)
+		typeAddr := binary.LittleEndian.Uint64(event.Args[a.TypeIndex].Data[:8])
+		if typeAddr == 0 || m.learned[typeAddr] {
+			continue
+		}
+		t, err := m.elf.RuntimeType(typeAddr)
 		if err != nil {
-			log.Debugf("process_vm_readv pid=%d addr=%#x len=%d: %v", pid, addr, len(dst), err)
-			return err
+			continue
 		}
-		if n != len(dst) {
-			return fmt.Errorf("short process memory read: got %d, want %d", n, len(dst))
+		recipe := up.CompileTypeRecipe(t)
+		if err := m.learnType(typeAddr, t); err != nil {
+			log.Debugf("learn type %#x: %v", typeAddr, err)
+			continue
 		}
-		return nil
+		m.learned[typeAddr] = true
+		m.typeRecipes[typeAddr] = recipe
+		log.Debugf("learned interface type %#x %s (%d extra fetches)", typeAddr, t.String(), len(recipe))
 	}
 }
 

@@ -15,6 +15,6 @@ type Uprobe struct {
 	RelOffset uint64         // relative to the function entry
 	Location  UprobeLocation // location of the probe
 	FetchArgs []*FetchArg    // fetch arguments
-	Values    []*Value       // type-aware value tree for debugger-style rendering (auto-fetch only)
+	Values    []*Value       // dwarf.Type descriptors for auto-fetch rendering; empty in manual --fargs/--frets mode
 	Wanted    bool
 }

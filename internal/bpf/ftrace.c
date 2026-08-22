@@ -104,7 +104,35 @@ struct arg_rule
 	// pointer is 0 the fetched value is reported as nil instead of being
 	// dereferenced (used for struct-pointer arguments/return values).
 	__u8 nil_check;
+	// iface_data marks the interface data word. After the generic fetch, BPF
+	// looks up type_recipes_map using args[type_idx] and copies extra leaves
+	// relative to this data pointer.
+	__u8 iface_data;
+	__u8 type_idx;
 };
+
+// Extra copies relative to an interface data pointer, keyed by the concrete
+// runtime type descriptor address (itab.Type / eface._type). One recipe per
+// type, shared by every interface slot that holds that type.
+struct rel_rule
+{
+	__u8 size;
+	__u8 length;
+	__u8 nil_check;
+	__u8 _pad;
+	__s16 offsets[8];
+	__u8 dereference[8];
+};
+
+struct type_recipe
+{
+	__u8 length;
+	__u8 _pad[7];
+	struct rel_rule rules[4];
+};
+
+const struct type_recipe *_______ __attribute__((unused));
+const struct rel_rule *________ __attribute__((unused));
 
 // fetch 1 arg needs several rules (at most 8 rules)
 struct arg_rules
@@ -172,6 +200,13 @@ struct bpf_map_def SEC("maps") arg_rules_map = {
 	.key_size = sizeof(__u64),
 	.value_size = sizeof(struct arg_rules),
 	.max_entries = 100,
+};
+
+struct bpf_map_def SEC("maps") type_recipes_map = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(__u64),
+	.value_size = sizeof(struct type_recipe),
+	.max_entries = 256,
 };
 
 struct bpf_map_def SEC("maps") event_queue = {
@@ -357,6 +392,61 @@ static __always_inline void fetch_args_from_memory(struct pt_regs *ctx, struct a
 		data->read_error = 1;
 }
 
+static __always_inline void fetch_from_base(__u64 addr, struct rel_rule *rule, struct arg_data *data)
+{
+	__builtin_memset(data, 0, sizeof(*data));
+	if (rule->nil_check && addr == 0)
+	{
+		data->is_nil = 1;
+		return;
+	}
+	for (int i = 0; i < 8 && i < rule->length; i++)
+	{
+		if (rule->dereference[i] == 1)
+		{
+			if (bpf_probe_read_user(&addr, sizeof(addr), (void *)addr + rule->offsets[i]) != 0)
+			{
+				data->read_error = 1;
+				return;
+			}
+		}
+		else
+		{
+			addr += rule->offsets[i];
+		}
+	}
+	if (bpf_probe_read_user(&data->data,
+						rule->size < MAX_DATA_SIZE ? rule->size : MAX_DATA_SIZE,
+						(void *)addr) != 0)
+		data->read_error = 1;
+}
+
+static __always_inline void apply_type_recipes(struct event *e, struct arg_rules *rules)
+{
+	for (int i = 0; i < 8 && i < rules->length; i++)
+	{
+		if (!rules->rules[i].iface_data)
+			continue;
+		__u8 tidx = rules->rules[i].type_idx;
+		if (tidx >= 8)
+			continue;
+		__u64 type_addr = 0;
+		__u64 data_ptr = 0;
+		bpf_probe_read_kernel(&type_addr, sizeof(type_addr), e->args[tidx].data);
+		bpf_probe_read_kernel(&data_ptr, sizeof(data_ptr), e->args[i].data);
+		if (type_addr == 0)
+			continue;
+		struct type_recipe *rec = bpf_map_lookup_elem(&type_recipes_map, &type_addr);
+		if (!rec)
+			continue;
+		for (int j = 0; j < 4 && j < rec->length && e->arg_count < 8; j++)
+		{
+			fetch_from_base(data_ptr, &rec->rules[j], &e->args[e->arg_count]);
+			e->arg_count++;
+		}
+	}
+}
+
 // Fetch all leaves directly into the event scratch value. The whole event is
 // subsequently pushed once, so queue overwrite can only drop a complete event.
 static __always_inline void fetch_args(struct pt_regs *ctx, struct event *e)
@@ -380,6 +470,7 @@ static __always_inline void fetch_args(struct pt_regs *ctx, struct event *e)
 			break;
 		}
 	}
+	apply_type_recipes(e, rules);
 }
 
 static __always_inline struct runtime_stats *get_runtime_stats()

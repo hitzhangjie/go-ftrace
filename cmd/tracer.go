@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"debug/dwarf"
 	"fmt"
 	"os"
 	"os/signal"
@@ -279,6 +280,9 @@ requireConfirm:
 	if err != nil {
 		return
 	}
+	mgr.SetTypeLearner(func(addr uint64, typ dwarf.Type) error {
+		return t.bpf.SetTypeRecipe(addr, uprobe.CompileTypeRecipe(typ))
+	})
 
 	// 聚合模式下按固定周期打印中间汇总（累计统计，不重置），
 	// 避免长时间运行时只能靠 Ctrl+C 才能看到结果。

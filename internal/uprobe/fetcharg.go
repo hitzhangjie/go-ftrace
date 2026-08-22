@@ -20,6 +20,12 @@ type FetchArg struct {
 	// reports nil, the value is rendered as nil instead of dereferencing
 	// address 0.
 	NilCheck bool
+
+	// IfaceData marks the interface data word. After the generic fetch, BPF
+	// looks up type_recipes_map[args[TypeIndex]] and copies extra leaves
+	// relative to this data pointer.
+	IfaceData bool
+	TypeIndex int
 }
 
 type ArgLocation int

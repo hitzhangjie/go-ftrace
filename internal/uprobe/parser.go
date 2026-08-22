@@ -25,14 +25,13 @@ type ParseOptions struct {
 	FetchFuncArgs    map[string][]FetchArgExpr // funcname: ordered var exprs (entry args)
 	RetFetchFuncArgs map[string][]FetchArgExpr // funcname: ordered var exprs (return values)
 
-	// AutoFetchArgs enables automatic derivation of entry-argument fetch
-	// rules from DWARF debug info for functions that do not have an explicit
-	// --fargs rule.
+	// AutoFetchArgs compiles entry-argument FetchArgs from dwarf.Type for
+	// functions that do not have an explicit --fargs rule. BPF copies those
+	// bytes at the probe; userspace only decodes the snapshot.
 	AutoFetchArgs bool
 
-	// AutoFetchRets enables automatic derivation of return-value fetch rules
-	// from DWARF debug info for functions that do not have an explicit
-	// --frets rule.
+	// AutoFetchRets compiles return-value FetchArgs from dwarf.Type for
+	// functions that do not have an explicit --frets rule.
 	AutoFetchRets bool
 }
 
@@ -86,8 +85,8 @@ func Parse(elf *elf.ELF, opts *ParseOptions) (uprobes []Uprobe, err error) {
 		}
 	}
 
-	// Fill in automatically derived fetch rules (and their type-aware value
-	// trees) for functions that do not have explicit --fargs/--frets rules.
+	// Fill in automatically derived ABI-word fetch rules and dwarf.Type
+	// value descriptors for functions that do not have explicit --fargs/--frets rules.
 	argValues := map[string][]*Value{}
 	retValues := map[string][]*Value{}
 	fillAutoFetch(elf, attachFuncs, fetchArgs, retFetchArgs, argValues, retValues, opts.AutoFetchArgs, opts.AutoFetchRets)

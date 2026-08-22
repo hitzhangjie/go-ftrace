@@ -28,6 +28,8 @@ type GoftraceArgRule struct {
 	Offsets     [8]int16
 	Dereference [8]uint8
 	NilCheck    uint8
+	IfaceData   uint8
+	TypeIdx     uint8
 	_           [1]byte
 }
 
@@ -54,6 +56,15 @@ type GoftraceEvent struct {
 	_                 [4]byte
 }
 
+type GoftraceRelRule struct {
+	Size        uint8
+	Length      uint8
+	NilCheck    uint8
+	Pad         uint8
+	Offsets     [8]int16
+	Dereference [8]uint8
+}
+
 type GoftraceRuntimeStats struct {
 	WantedRoots         uint64
 	AdmittedRoots       uint64
@@ -77,6 +88,12 @@ type GoftraceTraceState struct {
 	EventCount        uint32
 	SampleDenominator uint32
 	Pad               uint32
+}
+
+type GoftraceTypeRecipe struct {
+	Length uint8
+	Pad    [7]uint8
+	Rules  [4]GoftraceRelRule
 }
 
 // LoadGoftrace returns the embedded CollectionSpec for Goftrace.
@@ -137,6 +154,7 @@ type GoftraceMapSpecs struct {
 	ShouldTraceGoid *ebpf.MapSpec `ebpf:"should_trace_goid"`
 	ShouldTraceRet  *ebpf.MapSpec `ebpf:"should_trace_ret"`
 	ShouldTraceRip  *ebpf.MapSpec `ebpf:"should_trace_rip"`
+	TypeRecipesMap  *ebpf.MapSpec `ebpf:"type_recipes_map"`
 }
 
 // GoftraceObjects contains all objects after they have been loaded into the kernel.
@@ -166,6 +184,7 @@ type GoftraceMaps struct {
 	ShouldTraceGoid *ebpf.Map `ebpf:"should_trace_goid"`
 	ShouldTraceRet  *ebpf.Map `ebpf:"should_trace_ret"`
 	ShouldTraceRip  *ebpf.Map `ebpf:"should_trace_rip"`
+	TypeRecipesMap  *ebpf.Map `ebpf:"type_recipes_map"`
 }
 
 func (m *GoftraceMaps) Close() error {
@@ -178,6 +197,7 @@ func (m *GoftraceMaps) Close() error {
 		m.ShouldTraceGoid,
 		m.ShouldTraceRet,
 		m.ShouldTraceRip,
+		m.TypeRecipesMap,
 	)
 }
 

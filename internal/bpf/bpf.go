@@ -167,6 +167,10 @@ func (b *BPF) setArgRules(pc uint64, fetchArgs []*uprobe.FetchArg) (err error) {
 		if fetchArg.NilCheck {
 			rule.NilCheck = 1
 		}
+		if fetchArg.IfaceData {
+			rule.IfaceData = 1
+			rule.TypeIdx = uint8(fetchArg.TypeIndex)
+		}
 
 		j := 0
 		for _, r := range fetchArg.Rules {
@@ -182,6 +186,34 @@ func (b *BPF) setArgRules(pc uint64, fetchArgs []*uprobe.FetchArg) (err error) {
 		fmt.Printf("add arg rule at %x: %+v\n", pc, rule)
 	}
 	return b.objs.ArgRulesMap.Update(pc, argRules, ebpf.UpdateNoExist)
+}
+
+// SetTypeRecipe installs extra probe-time copies for a concrete interface
+// type, keyed by its runtime type descriptor address.
+func (b *BPF) SetTypeRecipe(typeAddr uint64, rules []uprobe.RelRule) error {
+	if b.objs == nil || b.objs.TypeRecipesMap == nil {
+		return fmt.Errorf("type recipe map not loaded")
+	}
+	n := len(rules)
+	if n > 4 {
+		n = 4
+	}
+	rec := GoftraceTypeRecipe{Length: uint8(n)}
+	for i := 0; i < n; i++ {
+		r := rules[i]
+		rr := GoftraceRelRule{Size: uint8(r.Size), Length: uint8(len(r.Steps)), NilCheck: 1}
+		for j, s := range r.Steps {
+			if j >= 8 {
+				break
+			}
+			rr.Offsets[j] = int16(s.Offset)
+			if s.Dereference {
+				rr.Dereference[j] = 1
+			}
+		}
+		rec.Rules[i] = rr
+	}
+	return b.objs.TypeRecipesMap.Update(typeAddr, rec, ebpf.UpdateAny)
 }
 
 func (b *BPF) setWanted(uprobe uprobe.Uprobe) (err error) {

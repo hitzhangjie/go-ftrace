@@ -9,45 +9,35 @@ import (
 	"strings"
 )
 
-// ValueKind classifies a Value node so the renderer knows how to format it.
+// ValueKind classifies a scalar for renderLeaf. Composite values are
+// interpreted by walking dwarf.Type instead of a parallel Kind tree.
 type ValueKind int
 
 const (
-	KindScalar    ValueKind = iota // signed/unsigned integer, rendered in decimal
-	KindBool                       // Go bool, rendered as true/false
-	KindFloat                      // float32/float64
-	KindPointer                    // opaque pointer, rendered as 0x... or nil
-	KindString                     // Go string, rendered as a quoted string
-	KindSlice                      // Go slice, rendered as []T(len=.., cap=..)
-	KindInterface                  // Go interface, rendered as nil or interface{...}
-	KindStruct                     // inline struct, rendered as T{...}
-	KindStructPtr                  // *struct, rendered as &T{...} or nil
+	KindScalar  ValueKind = iota // signed/unsigned integer, rendered in decimal
+	KindBool                     // Go bool, rendered as true/false
+	KindFloat                    // float32/float64
+	KindPointer                  // opaque pointer, rendered as 0x... or nil
 )
 
-// Value is a node in the type-aware value tree for one argument or return
-// value. Leaves (KindScalar/KindBool/KindFloat/KindPointer) carry the decode
-// type/size of a single fetched word; composite nodes group their fields in
-// fetch order (the same order as the flattened FetchArgs).
+// maxReadSize caps a snapshot read while walking dwarf.Type.
+const maxReadSize = 4096
+
+// Value is one auto-fetched argument or return value. Auto mode compiles
+// dwarf.Type into FetchArgs at startup; BPF copies those bytes at the probe.
+// Rendering walks the same Type over that snapshot only.
 type Value struct {
-	Kind ValueKind
 	Name string
+	Type dwarf.Type
 
-	// Leaf decode info (KindScalar/KindBool/KindFloat/KindPointer).
-	Typ  string // "u8".."u64", "s8".."s64", "f32","f64", "bool"
-	Size int
+	// WordCount is the number of ABI-word leaves. Captures is the number of
+	// extra probe-time memory leaves (object prefix, string bytes, interface
+	// concrete value and one pointer chase) that follow the ABI words.
+	WordCount int
+	Captures  int
 
-	// Struct fields, in fetch order (KindStruct / KindStructPtr).
-	Fields []*Value
-
-	// Rendering annotations.
-	StructName string // KindStruct / KindStructPtr
-	ElemType   string // KindSlice (slice type name, e.g. "[]int")
-
-	// Interface metadata. RuntimeType maps the captured runtime type pointer to
-	// its DWARF definition; it is deliberately excluded from leaf accounting.
-	InterfaceNonEmpty bool
-	RuntimeType       func(uint64) (dwarf.Type, error)
-	ReadMemory        func(uint64, []byte) error
+	// RuntimeType maps a captured runtime type pointer to its DWARF definition.
+	RuntimeType func(uint64) (dwarf.Type, error)
 }
 
 // LeafData carries the raw bytes and nil marker of one fetched leaf value.
@@ -57,180 +47,360 @@ type LeafData struct {
 	Unavailable bool
 }
 
-// BindInterfaceMemory attaches a process-specific memory reader to every
-// interface node, including interfaces nested in structs. Static values are
-// fully described and fetched by their precomputed rules, while an interface's
-// concrete type is known only at runtime and may require following pointers to
-// render its dynamic value.
-func BindInterfaceMemory(values []*Value, readMemory func(uint64, []byte) error) {
-	var bind func(*Value)
-	bind = func(v *Value) {
-		if v.Kind == KindInterface {
-			v.ReadMemory = readMemory
-		}
-		for _, field := range v.Fields {
-			bind(field)
-		}
-	}
-	for _, v := range values {
-		bind(v)
-	}
-}
-
 // RenderValues renders a list of top-level values into a single
 // comma-separated, debugger-style string. data must provide one LeafData per
-// leaf in fetch order (the same order as the flattened FetchArgs).
+// leaf in fetch order (the same order as the compiled FetchArgs).
 func RenderValues(values []*Value, data []LeafData) string {
+	return RenderValuesRecipes(values, data, nil)
+}
+
+// RenderValuesRecipes is RenderValues plus type-specialized extra leaves that
+// BPF appended after the generic snapshot (see type_recipes_map).
+func RenderValuesRecipes(values []*Value, data []LeafData, recipes map[uint64][]RelRule) string {
+	generic := 0
+	for _, v := range values {
+		generic += v.leafCount()
+	}
+	extraCur := generic
 	cur := 0
 	parts := make([]string, 0, len(values))
 	for _, v := range values {
-		parts = append(parts, v.Name+"="+renderNode(v, data, &cur))
+		parts = append(parts, v.Name+"="+renderAuto(v, data, &cur, data, &extraCur, recipes))
 	}
 	return strings.Join(parts, ", ")
 }
 
-func renderNode(v *Value, data []LeafData, cur *int) string {
-	leaves := v.leafCount()
-	if leaves > 0 && *cur+leaves > len(data) {
-		*cur = len(data)
+func renderAuto(v *Value, data []LeafData, cur *int, all []LeafData, extraCur *int, recipes map[uint64][]RelRule) string {
+	n := v.leafCount()
+	if n == 0 || *cur+n > len(data) {
+		if n > 0 {
+			*cur += n
+			if *cur > len(data) {
+				*cur = len(data)
+			}
+		}
 		return "<unavailable>"
 	}
 
-	if v.Kind != KindStruct && v.Kind != KindStructPtr {
-		for i := 0; i < leaves; i++ {
-			if data[*cur+i].Unavailable {
-				*cur += leaves
-				return "<unavailable>"
-			}
+	words := data[*cur : *cur+v.WordCount]
+	*cur += v.WordCount
+	captures := data[*cur : *cur+v.Captures]
+	*cur += v.Captures
+
+	t := underlying(v.Type)
+	if st, ok := t.(*dwarf.StructType); ok && isInterface(st) && len(words) > 0 {
+		if words[0].IsNil || readUint(words[0].Data) == 0 {
+			return "nil"
+		}
+	}
+	for _, w := range words {
+		if w.Unavailable {
+			return "<unavailable>"
+		}
+	}
+	if v.Captures > 0 && captures[0].IsNil {
+		if _, ok := t.(*dwarf.PtrType); ok {
+			return "nil"
 		}
 	}
 
-	switch v.Kind {
-	case KindScalar, KindBool, KindFloat, KindPointer:
-		d := data[*cur]
-		*cur++
-		return renderLeaf(v, d.Data)
+	header := concatLeaves(words)
+	if len(header) == 0 {
+		return "<unavailable>"
+	}
 
-	case KindString:
-		// string data (raw backing-array bytes) then length.
-		raw := data[*cur]
-		*cur++
-		lenD := data[*cur]
-		*cur++
-		n := int(int64(binary.LittleEndian.Uint64(lenD.Data)))
-		if n < 0 {
-			n = 0
-		}
-		truncated := false
-		if n > len(raw.Data) {
-			n = len(raw.Data)
-			truncated = true
-		}
-		q := strconv.Quote(string(raw.Data[:n]))
-		if truncated {
-			q = q[:len(q)-1] + "...\""
-		}
-		return q
-
-	case KindSlice:
-		// data pointer (not dereferenced here), len, cap.
-		_ = data[*cur]
-		*cur++
-		lenD := data[*cur]
-		*cur++
-		capD := data[*cur]
-		*cur++
-		ln := int64(binary.LittleEndian.Uint64(lenD.Data))
-		cp := int64(binary.LittleEndian.Uint64(capD.Data))
-		typ := v.ElemType
-		if typ == "" {
-			typ = "[]"
-		}
-		return fmt.Sprintf("%s(len=%d, cap=%d)", typ, ln, cp)
-
-	case KindInterface:
-		typeD := data[*cur]
-		*cur++
-		dataD := data[*cur]
-		*cur++
-		valueD := data[*cur]
-		*cur++
-		typeAddr := readUint(typeD.Data)
-		dataAddr := readUint(dataD.Data)
-		if typeAddr == 0 {
+	snap := &memSnapshot{}
+	if pt, ok := t.(*dwarf.PtrType); ok {
+		ptr := readUint(header)
+		if ptr == 0 {
 			return "nil"
 		}
-		if v.RuntimeType == nil {
-			return "interface{type=<unknown>, value=<unavailable>}"
+		pointee := underlying(pt.Type)
+		if st, ok := pointee.(*dwarf.StructType); ok && !isRuntimeStruct(st) {
+			if len(captures) == 0 || captures[0].Unavailable {
+				return typeName(pt) + "(<unavailable>)"
+			}
+			obj := captures[0].Data
+			snap.put(ptr, captures[0])
+			consumeMemCaptures(pt.Type, obj, ptr, captures[1:], snap)
+			applyNestedRecipes(pt.Type, obj, recipes, all, extraCur, snap)
+			return "&" + renderDynamicValue(pt.Type, obj, ptr, v.RuntimeType, snap.read, 0)
 		}
-		t, err := v.RuntimeType(typeAddr)
-		if err != nil {
-			return "interface{type=<unknown>, value=<unavailable>}"
+		return fmt.Sprintf("0x%x", ptr)
+	}
+
+	if st, ok := t.(*dwarf.StructType); ok && !isString(st) && !isSlice(st) && !isInterface(st) {
+		header = scatterWords(v.Type, header)
+		consumeRegCaptures(v.Type, header, captures, snap)
+		return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0)
+	}
+
+	if st, ok := t.(*dwarf.StructType); ok && isString(st) {
+		if len(captures) > 0 {
+			snap.put(readUint(header), captures[0])
 		}
-		direct, err := runtimeTypeIsDirect(typeAddr, v.ReadMemory)
-		if err != nil {
-			return t.String() + "(<unavailable>)"
+		return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0)
+	}
+
+	if st, ok := t.(*dwarf.StructType); ok && isInterface(st) {
+		bindIfaceCaptures(header, captures, snap)
+		if len(header) >= 16 {
+			applyRecipeExtras(readUint(header), readUint(header[8:]), all, extraCur, recipes, snap)
 		}
-		if direct {
-			if ptr, ok := underlying(t).(*dwarf.PtrType); ok {
-				if dataAddr == 0 {
-					return "nil"
+		return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0)
+	}
+
+	return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0)
+}
+
+func bindIfaceCaptures(header []byte, captures []LeafData, snap *memSnapshot) {
+	if len(header) < 16 || len(captures) == 0 {
+		return
+	}
+	snap.put(readUint(header[8:]), captures[0])
+}
+
+func evalRel(base uint64, steps []ArgRule, snap *memSnapshot) uint64 {
+	addr := base
+	for _, s := range steps {
+		if s.Dereference {
+			var p [8]byte
+			if snap.read(addr+uint64(s.Offset), p[:]) != nil {
+				return 0
+			}
+			addr = readUint(p[:])
+			continue
+		}
+		addr += uint64(s.Offset)
+	}
+	return addr
+}
+
+func applyRecipeExtras(typeAddr, dataPtr uint64, all []LeafData, extraCur *int, recipes map[uint64][]RelRule, snap *memSnapshot) {
+	if recipes == nil || extraCur == nil || typeAddr == 0 {
+		return
+	}
+	rec := recipes[typeAddr]
+	for _, r := range rec {
+		if *extraCur >= len(all) {
+			return
+		}
+		addr := evalRel(dataPtr, r.Steps, snap)
+		snap.put(addr, all[*extraCur])
+		*extraCur++
+	}
+}
+
+func applyNestedRecipes(t dwarf.Type, mem []byte, recipes map[uint64][]RelRule, all []LeafData, extraCur *int, snap *memSnapshot) {
+	t = underlying(t)
+	st, ok := t.(*dwarf.StructType)
+	if !ok {
+		return
+	}
+	switch {
+	case isInterface(st):
+		typeAddr := uint64(0)
+		if len(mem) >= 8 {
+			typeAddr = readUint(mem)
+		}
+		if interfaceIsNonEmpty(st) && typeAddr != 0 {
+			var p [8]byte
+			if snap.read(typeAddr+8, p[:]) == nil {
+				typeAddr = readUint(p[:])
+			}
+		}
+		dataPtr := uint64(0)
+		if len(mem) >= 16 {
+			dataPtr = readUint(mem[8:])
+		}
+		applyRecipeExtras(typeAddr, dataPtr, all, extraCur, recipes, snap)
+	case isString(st), isSlice(st):
+		return
+	default:
+		for _, f := range st.Field {
+			start := int(f.ByteOffset)
+			var fieldMem []byte
+			if start >= 0 && start < len(mem) {
+				fieldMem = mem[start:]
+			}
+			applyNestedRecipes(f.Type, fieldMem, recipes, all, extraCur, snap)
+		}
+	}
+}
+
+func concatLeaves(leaves []LeafData) []byte {
+	var b []byte
+	for _, l := range leaves {
+		b = append(b, l.Data...)
+	}
+	return b
+}
+
+type snapChunk struct {
+	addr uint64
+	data []byte
+}
+
+type memSnapshot struct {
+	chunks []snapChunk
+}
+
+func (s *memSnapshot) put(addr uint64, leaf LeafData) {
+	if s == nil || addr == 0 || leaf.Unavailable || leaf.IsNil || len(leaf.Data) == 0 {
+		return
+	}
+	s.chunks = append(s.chunks, snapChunk{addr: addr, data: leaf.Data})
+}
+
+func (s *memSnapshot) read(addr uint64, dst []byte) error {
+	if s == nil {
+		return fmt.Errorf("address %#x not in probe snapshot", addr)
+	}
+	for _, c := range s.chunks {
+		if addr >= c.addr && addr < c.addr+uint64(len(c.data)) {
+			n := copy(dst, c.data[addr-c.addr:])
+			if n == len(dst) {
+				return nil
+			}
+			return fmt.Errorf("short snapshot read at %#x", addr)
+		}
+	}
+	return fmt.Errorf("address %#x not in probe snapshot", addr)
+}
+
+func consumeMemCaptures(t dwarf.Type, mem []byte, addr uint64, captures []LeafData, snap *memSnapshot) []LeafData {
+	t = underlying(t)
+	st, ok := t.(*dwarf.StructType)
+	if !ok {
+		return captures
+	}
+	switch {
+	case isString(st):
+		if len(captures) == 0 {
+			return captures
+		}
+		if len(mem) >= 8 {
+			snap.put(readUint(mem), captures[0])
+		}
+		return captures[1:]
+	case isSlice(st):
+		return captures
+	case isInterface(st):
+		need := 2
+		if interfaceIsNonEmpty(st) {
+			need = 3
+		}
+		if len(captures) < need {
+			return captures
+		}
+		if interfaceIsNonEmpty(st) {
+			if len(mem) >= 8 {
+				snap.put(readUint(mem)+8, captures[0])
+			}
+			captures = captures[1:]
+		}
+		dataPtr := uint64(0)
+		if len(mem) >= 16 {
+			dataPtr = readUint(mem[8:])
+		}
+		captures = captures[1:] // skip the data-word leaf; value blob follows
+		if len(captures) == 0 {
+			return captures
+		}
+		snap.put(dataPtr, captures[0])
+		return captures[1:]
+	default:
+		for _, f := range st.Field {
+			start := int(f.ByteOffset)
+			var fieldMem []byte
+			if start >= 0 && start < len(mem) {
+				fieldMem = mem[start:]
+			}
+			captures = consumeMemCaptures(f.Type, fieldMem, addr+uint64(f.ByteOffset), captures, snap)
+		}
+		return captures
+	}
+}
+
+func consumeRegCaptures(t dwarf.Type, img []byte, captures []LeafData, snap *memSnapshot) []LeafData {
+	t = underlying(t)
+	st, ok := t.(*dwarf.StructType)
+	if !ok {
+		return captures
+	}
+	switch {
+	case isString(st):
+		if len(captures) == 0 {
+			return captures
+		}
+		if len(img) >= 8 {
+			snap.put(readUint(img), captures[0])
+		}
+		return captures[1:]
+	case isSlice(st):
+		return captures
+	case isInterface(st):
+		bindIfaceCaptures(img, captures, snap)
+		if len(captures) >= 1 {
+			return captures[1:]
+		}
+		return nil
+	default:
+		for _, f := range st.Field {
+			start := int(f.ByteOffset)
+			var fieldMem []byte
+			if start >= 0 && start < len(img) {
+				fieldMem = img[start:]
+			}
+			captures = consumeRegCaptures(f.Type, fieldMem, captures, snap)
+		}
+		return captures
+	}
+}
+
+// scatterWords places ABI register words into a memory image using DWARF
+// field offsets. A bool occupies a full register but only one byte in memory;
+// copying each field to ByteOffset reconstructs the in-memory layout that
+// renderDynamicValue expects.
+func scatterWords(t dwarf.Type, words []byte) []byte {
+	size := t.Size()
+	if size <= 0 {
+		return words
+	}
+	img := make([]byte, size)
+	consume := 0
+	var walk func(dwarf.Type, int64)
+	walk = func(typ dwarf.Type, base int64) {
+		typ = underlying(typ)
+		switch tt := typ.(type) {
+		case *dwarf.StructType:
+			if isString(tt) || isSlice(tt) || isInterface(tt) {
+				n := abiWordCount(tt) * 8
+				if consume+n <= len(words) && int(base)+n <= len(img) {
+					copy(img[base:], words[consume:consume+n])
 				}
-				return "&" + renderDynamicValue(ptr.Type, valueD.Data, dataAddr, v.RuntimeType, v.ReadMemory, 1)
+				consume += n
+				return
 			}
-			return renderDynamicValue(t, dataD.Data, dataAddr, v.RuntimeType, v.ReadMemory, 0)
+			for _, f := range tt.Field {
+				walk(f.Type, base+f.ByteOffset)
+			}
+		default:
+			sz := int(typ.Size())
+			if sz <= 0 {
+				sz = 8
+			}
+			if sz > 8 {
+				sz = 8
+			}
+			if consume+sz <= len(words) && int(base)+sz <= len(img) {
+				copy(img[base:int(base)+sz], words[consume:consume+sz])
+			}
+			consume += 8
 		}
-		return renderDynamicValue(t, valueD.Data, dataAddr, v.RuntimeType, v.ReadMemory, 0)
-
-	case KindStruct:
-		return renderStruct(v, data, cur)
-
-	case KindStructPtr:
-		if v.leafCount() == 0 {
-			return "&" + structName(v) + "{}"
-		}
-		if data[*cur].IsNil {
-			*cur += v.leafCount()
-			return "nil"
-		}
-		return "&" + structName(v) + renderFields(v, data, cur)
 	}
-	return ""
-}
-
-func renderStruct(v *Value, data []LeafData, cur *int) string {
-	return structName(v) + renderFields(v, data, cur)
-}
-
-func renderFields(v *Value, data []LeafData, cur *int) string {
-	var b strings.Builder
-	b.WriteByte('{')
-	for i, f := range v.Fields {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(shortName(f.Name))
-		b.WriteByte(':')
-		b.WriteString(renderNode(f, data, cur))
-	}
-	b.WriteByte('}')
-	return b.String()
-}
-
-func structName(v *Value) string {
-	if v.StructName != "" {
-		return v.StructName
-	}
-	return "struct"
-}
-
-// shortName strips the dotted prefix so a nested field renders with only its
-// own identifier (e.g. "req.Id" -> "Id").
-func shortName(name string) string {
-	if i := strings.LastIndex(name, "."); i >= 0 {
-		return name[i+1:]
-	}
-	return name
+	walk(t, 0)
+	return img
 }
 
 const maxDynamicDepth = 8
@@ -238,19 +408,52 @@ const maxDynamicDepth = 8
 type runtimeTypeResolver func(uint64) (dwarf.Type, error)
 type memoryReader func(uint64, []byte) error
 
-// runtimeTypeIsDirect supports both Go <=1.25 (direct bit in Kind at +23)
-// and Go >=1.26 (direct bit in TFlag at +20). The common runtime type prefix
-// has kept these byte offsets stable on amd64.
-func runtimeTypeIsDirect(typeAddr uint64, readMemory memoryReader) (bool, error) {
-	if readMemory == nil {
-		return false, fmt.Errorf("process memory reader unavailable")
+// typeIsDirect approximates Go's DirectIface flag from DWARF so rendering
+// does not need a live read of the runtime type header.
+func typeIsDirect(t dwarf.Type) bool {
+	t = underlying(t)
+	switch tt := t.(type) {
+	case *dwarf.PtrType:
+		return true
+	case *dwarf.FuncType:
+		return true
+	case *dwarf.StructType:
+		if isString(tt) || isSlice(tt) || isInterface(tt) {
+			return false
+		}
+		if isRuntimeStruct(tt) {
+			return true
+		}
+		if tt.Size() > 8 {
+			return false
+		}
+		if tt.Size() == 8 && len(tt.Field) > 0 {
+			if _, ok := underlying(tt.Field[0].Type).(*dwarf.PtrType); ok {
+				return true
+			}
+		}
+		return tt.Size() > 0 && tt.Size() <= 8 && len(tt.Field) == 0
+	default:
+		size := tt.Size()
+		return size > 0 && size <= 8
 	}
-	var header [24]byte
-	if err := readMemory(typeAddr, header[:]); err != nil {
-		return false, err
+}
+
+func objectBytes(t dwarf.Type, data []byte, addr uint64, readMemory memoryReader) []byte {
+	size := int(t.Size())
+	if size <= 0 {
+		return data
 	}
-	const directIface = byte(1 << 5)
-	return header[20]&directIface != 0 || header[23]&directIface != 0, nil
+	if readMemory != nil && addr != 0 && size <= maxReadSize {
+		buf := make([]byte, size)
+		if err := readMemory(addr, buf); err == nil {
+			return buf
+		}
+	}
+	if len(data) >= size {
+		return data[:size]
+	}
+	return data
 }
 
 func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runtimeTypeResolver, readMemory memoryReader, depth int) string {
@@ -265,12 +468,13 @@ func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runt
 			return "nil"
 		}
 		pointee := underlying(tt.Type)
-		if readMemory == nil || pointee.Size() <= 0 || pointee.Size() > autoStringSize {
-			return tt.String() + "(<unavailable>)"
+		size := int(pointee.Size())
+		if readMemory == nil || size <= 0 || size > maxReadSize {
+			return typeName(tt) + "(<unavailable>)"
 		}
-		buf := make([]byte, pointee.Size())
+		buf := make([]byte, size)
 		if err := readMemory(ptr, buf); err != nil {
-			return tt.String() + "(<unavailable>)"
+			return typeName(tt) + "(<unavailable>)"
 		}
 		return "&" + renderDynamicValue(tt.Type, buf, ptr, resolveType, readMemory, depth+1)
 	case *dwarf.StructType:
@@ -307,7 +511,8 @@ func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runt
 				return tt.StructName + "(<unavailable>)"
 			}
 			return fmt.Sprintf("%s(len=%d, cap=%d)", tt.StructName,
-				int64(binary.LittleEndian.Uint64(data[8:16])), int64(binary.LittleEndian.Uint64(data[16:24])))
+				int64(binary.LittleEndian.Uint64(data[8:16])),
+				int64(binary.LittleEndian.Uint64(data[16:24])))
 		case isInterface(tt):
 			if len(data) < 16 {
 				return "interface{type=<unknown>, value=<unavailable>}"
@@ -317,39 +522,40 @@ func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runt
 			if typeAddr == 0 {
 				return "nil"
 			}
-			if resolveType == nil || readMemory == nil {
+			if resolveType == nil {
 				return "interface{type=<unknown>, value=<unavailable>}"
 			}
-			if interfaceIsNonEmpty(tt) {
+			dynamicType, err := resolveType(typeAddr)
+			if err != nil && interfaceIsNonEmpty(tt) {
+				if readMemory == nil {
+					return "interface{type=<unknown>, value=<unavailable>}"
+				}
 				var typeWord [8]byte
 				if err := readMemory(typeAddr+8, typeWord[:]); err != nil {
 					return "interface{type=<unknown>, value=<unavailable>}"
 				}
 				typeAddr = readUint(typeWord[:])
+				dynamicType, err = resolveType(typeAddr)
 			}
-			dynamicType, err := resolveType(typeAddr)
 			if err != nil {
 				return "interface{type=<unknown>, value=<unavailable>}"
 			}
-			direct, err := runtimeTypeIsDirect(typeAddr, readMemory)
-			if err != nil {
-				return dynamicType.String() + "(<unavailable>)"
-			}
-			if direct {
+			if typeIsDirect(dynamicType) {
 				var word [8]byte
 				binary.LittleEndian.PutUint64(word[:], dataAddr)
 				return renderDynamicValue(dynamicType, word[:], dataAddr, resolveType, readMemory, depth+1)
 			}
-			size := dynamicType.Size()
-			if size <= 0 || size > autoStringSize {
+			size := int(dynamicType.Size())
+			if size <= 0 || size > maxReadSize {
 				size = autoStringSize
 			}
-			value := make([]byte, size)
-			if dataAddr == 0 || readMemory(dataAddr, value) != nil {
-				return dynamicType.String() + "(<unavailable>)"
+			value := objectBytes(dynamicType, nil, dataAddr, readMemory)
+			if len(value) == 0 {
+				return typeName(dynamicType) + "(<unavailable>)"
 			}
 			return renderDynamicValue(dynamicType, value, dataAddr, resolveType, readMemory, depth+1)
 		default:
+			data = objectBytes(tt, data, addr, readMemory)
 			var b strings.Builder
 			b.WriteString(tt.StructName)
 			b.WriteByte('{')
@@ -359,12 +565,7 @@ func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runt
 				}
 				b.WriteString(f.Name)
 				b.WriteByte(':')
-				start := int(f.ByteOffset)
-				if start < 0 || start >= len(data) {
-					b.WriteString("<unavailable>")
-					continue
-				}
-				b.WriteString(renderDynamicValue(f.Type, data[start:], addr+uint64(start), resolveType, readMemory, depth+1))
+				b.WriteString(renderStructField(f, data, addr, resolveType, readMemory, depth+1))
 			}
 			b.WriteByte('}')
 			return b.String()
@@ -374,11 +575,61 @@ func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runt
 		if !ok || size > len(data) {
 			return "<unavailable>"
 		}
-		return renderLeaf(&Value{Kind: kind, Typ: typ, Size: size}, data[:size])
+		return renderLeaf(&leafValue{Kind: kind, Typ: typ, Size: size}, data[:size])
 	}
 }
 
-func renderLeaf(v *Value, data []byte) string {
+func renderStructField(f *dwarf.StructField, data []byte, addr uint64, resolveType runtimeTypeResolver, readMemory memoryReader, depth int) string {
+	start := int(f.ByteOffset)
+	if start < 0 {
+		return "<unavailable>"
+	}
+	fieldSize := int(f.Type.Size())
+	var fieldData []byte
+	if start < len(data) {
+		fieldData = data[start:]
+	}
+	if fieldSize > 0 && len(fieldData) < fieldSize && readMemory != nil && addr != 0 {
+		buf := make([]byte, fieldSize)
+		if err := readMemory(addr+uint64(f.ByteOffset), buf); err == nil {
+			fieldData = buf
+		}
+	}
+	if len(fieldData) == 0 {
+		return "<unavailable>"
+	}
+	return renderDynamicValue(f.Type, fieldData, addr+uint64(f.ByteOffset), resolveType, readMemory, depth)
+}
+
+func interfaceIsNonEmpty(st *dwarf.StructType) bool {
+	return st.StructName == "runtime.iface" || hasFields(st, "tab", "data")
+}
+
+func typeName(t dwarf.Type) string {
+	if t == nil {
+		return "<unknown>"
+	}
+	if n := t.Common().Name; n != "" {
+		return n
+	}
+	switch tt := underlying(t).(type) {
+	case *dwarf.PtrType:
+		return "*" + typeName(tt.Type)
+	case *dwarf.StructType:
+		if tt.StructName != "" {
+			return tt.StructName
+		}
+	}
+	return t.String()
+}
+
+type leafValue struct {
+	Kind ValueKind
+	Typ  string
+	Size int
+}
+
+func renderLeaf(v *leafValue, data []byte) string {
 	switch v.Kind {
 	case KindBool:
 		if len(data) > 0 && data[0] != 0 {
@@ -401,7 +652,6 @@ func renderLeaf(v *Value, data []byte) string {
 		}
 		return fmt.Sprintf("0x%x", addr)
 	}
-	// KindScalar
 	switch v.Typ {
 	case "s8":
 		return strconv.FormatInt(int64(int8(data[0])), 10)
@@ -425,23 +675,7 @@ func renderLeaf(v *Value, data []byte) string {
 
 // leafCount returns the number of fetched leaves under this node.
 func (v *Value) leafCount() int {
-	switch v.Kind {
-	case KindScalar, KindBool, KindFloat, KindPointer:
-		return 1
-	case KindString:
-		return 2
-	case KindInterface:
-		return 3
-	case KindSlice:
-		return 3
-	case KindStruct, KindStructPtr:
-		n := 0
-		for _, f := range v.Fields {
-			n += f.leafCount()
-		}
-		return n
-	}
-	return 0
+	return v.WordCount + v.Captures
 }
 
 func readUint(data []byte) uint64 {

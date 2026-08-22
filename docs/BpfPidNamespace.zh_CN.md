@@ -20,21 +20,21 @@ ret0=&main.MeshError{Code:500, Detail:*errors.errorString(<unavailable>)}
 
 | 片段 | 谁负责 | WSL2 上 |
 |---|---|---|
-| `Code:500` | BPF 在 `RET` 点读 `*(AX+0)` | 成功 |
-| 动态类型 `*errors.errorString` | BPF 读 itab，用户态用 DWARF `RuntimeType` 反查 ELF | 成功 |
-| 字符串 `"send failed"` | 用户态 `process_vm_readv` 读目标进程内存 | 失败 |
+| `Code:500` | BPF 在 `RET` 点复制 `*MeshError` 前缀，用户态按 `dwarf.Type` 读 offset 0 | 成功 |
+| 动态类型 `*errors.errorString` | 前缀里的 itab / type，用户态用 DWARF `RuntimeType` 反查 ELF | 成功 |
+| 字符串 `"send failed"` | 探针时按类型生成的 FetchArg 再跟一层指针，拷进 event | 与 PID 无关；未拷到的嵌套指针才可能 `<unavailable>` |
 
 如果是 BPF 叶子读取失败，渲染器会写成 `Detail:<unavailable>`，**不会**带上已经解析出的类型名。`*errors.errorString(<unavailable>)` 来自 `runtimeTypeIsDirect()`：类型已经认出，但跟读 runtime type header 失败，于是把 `t.String()` 和 `(<unavailable>)` 拼在一起。
 
 ## 2. 返回值是怎么走到 `<unavailable>` 的
 
-接口字段（这里是 `error`）在 auto 模式下会抓三个叶子：`.type`、`.data`、`.value`（data word 指向对象的 64 字节前缀）。BPF 在探针触发时完成这三次读取，结果随事件一起送到用户态。
+`main.send` 返回 `*MeshError`。Auto 模式不再为 `Code`、`Detail.itab`、`Detail.data` 各写一条 fetchrule，而是抓指针 word 和对象的 64 字节前缀。用户态用 `dwarf.Type` 解释这块前缀：`Code` 在 offset 0，`Detail` 是其中的 interface。
 
-用户态渲染 `KindInterface` 时：
+接口动态值渲染时：
 
-1. 用 `.type` 地址查 DWARF，得到 `*errors.errorString`（只读 ELF，不需要 PID）；
+1. 用 itab / type 地址查 DWARF，得到 `*errors.errorString`（只读 ELF，不需要 PID）；
 2. 调用 `process_vm_readv(event.Pid, typeAddr, 24)` 读 runtime type header，判断 DirectIface；
-3. 再按是否 direct，解释 `.value` 前缀，并可能继续 `process_vm_readv` 读字符串内容。
+3. 再按是否 direct 解释具体值，并可能继续 `process_vm_readv` 读字符串 backing array。
 
 第 2 步失败就会停在 `*errors.errorString(<unavailable>)`，即使 BPF 已经把 64 字节前缀带回来了。
 
@@ -96,10 +96,11 @@ uprobe 挂在可执行文件的 inode/offset 上，回调跑在被观测线程�
 
 ```text
 RET 探针触发                         ✅ 同 ns，与 PID 无关
-BPF 抓 Code / itab / data / 前缀     ✅ 读 current 的用户内存
+BPF 抓 *MeshError 指针和对象前缀     ✅ 读 current 的用户内存
 事件.pid = init-ns TGID              ❌ 外层编号
+用户态按 dwarf.Type 解释前缀中的 Code ✅ 不需要 PID
 用户态 RuntimeType(itab)             ✅ 读 ELF
-process_vm_readv(错误 PID)           ❌ 内层 ns 里查不到
+process_vm_readv(错误 PID)           ❌ 内层 ns 里查不到 backing array
 ```
 
 `goid` 只在单进程内唯一，内核状态机用 `(pid, goid)` 做 key。即使用了 init-ns PID，**内核内部仍然自洽**，调用栈重建也不会因此错乱；坏的只是事后跟读进程内存。
@@ -142,5 +143,5 @@ return bpf_get_current_pid_tgid() >> 32;
 ## 7. 仍然要注意的边界
 
 - uprobe 按 inode 挂载，**不会**按 PID 过滤。同一二进制的其他进程实例也会出事件。若某个实例与 ftrace 不在同一 pid ns，helper 会回退到 init-ns PID，对该实例的 `process_vm_readv` 仍可能 `ESRCH`。这是挂载模型的既有行为，不是本次回归。
-- 接口动态值里，字符串内容、嵌套指针仍然依赖事后 `process_vm_readv`。PID 对上之后，目标内存已释放或映射不可读时，仍会局部显示 `<unavailable>`。见 [Auto 模式原理](./AutoFetch.zh_CN.md)。
+- Auto 模式用户态不再为参数值做 `process_vm_readv`。静态字段和字符串在探针时按 FetchArg 拷贝；接口动态值第一次可能只有前缀，学会 `_type` 的相对规则之后才在后续命中时拷全。见 [Auto 模式原理](./AutoFetch.zh_CN.md)。
 - DirectIface 标志的字节位置随 Go 版本变化（1.25 及以前在 Kind `+23`，1.26 起在 TFlag `+20`）。这与 pid namespace 是独立问题；当前渲染器两处都检查。

@@ -243,24 +243,24 @@ main.(*Student).String(
 自动推导分成两步：
 
 1. `elf.FunctionVariables` 从目标函数 DWARF DIE 的直接子节点中读取形参和返回值类型；返回值通过 `DW_AT_variable_parameter` 或 Go 的 `~rN` 命名识别。
-2. `internal/uprobe/auto.go` 按 Go amd64 寄存器 ABI 的整数寄存器顺序，把类型树展开到 `ax, bx, cx, di, si, r8, r9, r10, r11`，同时生成面向 BPF 的扁平 `FetchArg` 列表和面向用户态渲染的结构化 `Value` 树。
+2. `internal/uprobe/auto.go` 按 Go amd64 寄存器 ABI 为每个参数分配 ABI word，编译面向 BPF 的通用 `FetchArg`。用户态保存 `dwarf.Type`，只解码探针时打进 event 的快照，不对堆/栈做事后 `process_vm_readv`。
 
-这里没有求值 DWARF location expression，而是假定目标函数使用当前实现所支持的 Go amd64 寄存器 ABI，并根据声明顺序和类型结构推算位置。这种简化不覆盖 ABI0、栈传参/栈返回、浮点/复数寄存器，以及寄存器容量不足时的完整栈回退规则；对这些函数应关闭自动推导并编写经过验证的手动规则。
+接口的具体类型启动时未知。通用规则只拷 type/data 和一块 `*data` 前缀；用户态第一次见到某个运行时 `_type` 地址后，把相对 data 指针的展开规则写入 `type_recipes_map`，之后同类型在探针当下追加拷贝。
 
-当前自动展开规则包括：
+这里没有求值 DWARF location expression。不覆盖 ABI0、栈传参/栈返回、浮点寄存器，以及寄存器耗尽后的完整栈回退。对这些函数应关闭自动推导并编写经过验证的手动规则。
 
 | Go 类型 | 抓取方式 |
 | --- | --- |
-| 整数、布尔、枚举、普通指针 | 一个整数寄存器标量 |
-| `string` | `.data` 最多读取数据区前 64 字节，`.len` 单独抓取并用于截断显示 |
-| slice | 抓取 `.data/.len/.cap` 三个 word，只显示头部，不读取元素 |
-| interface | 抓取动态类型地址、data word 和最多 64 字节的具体值前缀，用户态结合 runtime type 与 DWARF 递归还原 |
-| struct | 按字段递归展开 |
-| `*struct` | 读取指针 word，解引用后按 DWARF 字段偏移展开 |
+| 整数、布尔、枚举、普通指针 | 一个整数寄存器 word，用户态按 `dwarf.Type` 解码 |
+| `string` | data/len 两个 ABI word，探针时拷 backing array 最多 64 字节 |
+| slice | `.data/.len/.cap`，只显示头部 |
+| interface | 通用：type/data/`*data` 前缀；见到具体 `_type` 后再学相对规则 |
+| struct | 按 ABI 抓 word，渲染时按字段偏移还原 |
+| `*struct` | 指针 + 对象前缀 + 静态可确定的嵌套捕获；`NilCheck` |
 
-对于可能为 nil 的 `*struct`，自动规则会设置 `nil_check`。内核发现基址寄存器为 0 时不再解引用，用户态把同一对象的多个扁平字段合并显示为 `ret0=nil` 之类的结果。
+nil `error`（itab 为 0）的 type 规则也必须 `NilCheck`，否则会读地址 8 并显示 `<unavailable>`。
 
-自动推导还会只读取函数 DIE 的直接子节点，并对含 `defer` 的函数可能生成的重复 `~rN` 返回值 DIE 去重。完整原理、反射类比、接口动态值恢复和限制见 [`AutoFetch.zh_CN.md`](./AutoFetch.zh_CN.md)。
+完整原理、接口在线特化、以及废弃过的方案见 [`AutoFetch.zh_CN.md`](./AutoFetch.zh_CN.md)。
 
 ### 6.3 规则在 BPF map 中的表示
 
@@ -274,7 +274,7 @@ main.(*Student).String(
 
 手动规则超过上限时会在加载阶段报错。自动展开会为 string、slice、interface 这类复合值预留完整叶子容量，空间不足时整项跳过，避免只生成半个值；达到叶子或寄存器上限后会告警并保留此前已经成功生成的值。
 
-当前规则在 BPF 程序加载阶段一次性写入。map 本身是 HASH，但 CLI 尚未提供运行过程中动态增删规则的控制面。
+通用 `arg_rules_map` 在加载时写入。接口动态类型的相对规则写入 `type_recipes_map`，用户态在第一次观测到某个 `_type` 后更新，不需要重新 attach。
 
 ### 6.4 内核态取值
 

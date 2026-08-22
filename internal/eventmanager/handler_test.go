@@ -13,43 +13,53 @@ import (
 )
 
 func TestRenderEventArgsKeepsLeavesAtomic(t *testing.T) {
+	iface := &dwarf.StructType{
+		CommonType: dwarf.CommonType{Name: "runtime.iface", ByteSize: 16},
+		StructName: "runtime.iface",
+		Field: []*dwarf.StructField{
+			{Name: "tab", ByteOffset: 0},
+			{Name: "data", ByteOffset: 8},
+		},
+	}
 	meshError := &uprobe.Value{
-		Kind:       uprobe.KindStructPtr,
-		Name:       "ret0",
-		StructName: "main.MeshError",
-		Fields: []*uprobe.Value{
-			{Kind: uprobe.KindScalar, Name: "ret0.Code", Typ: "s64", Size: 8},
-			{
-				Kind: uprobe.KindInterface,
-				Name: "ret0.Detail",
-				RuntimeType: func(uint64) (dwarf.Type, error) {
-					return &dwarf.PtrType{
-						CommonType: dwarf.CommonType{Name: "*errors.errorString", ByteSize: 8},
-						Type: &dwarf.StructType{
-							CommonType: dwarf.CommonType{Name: "errors.errorString", ByteSize: 16},
-							StructName: "errors.errorString",
-						},
-					}, nil
+		Name: "ret0",
+		Type: &dwarf.PtrType{
+			CommonType: dwarf.CommonType{Name: "*main.MeshError", ByteSize: 8},
+			Type: &dwarf.StructType{
+				CommonType: dwarf.CommonType{Name: "main.MeshError", ByteSize: 24},
+				StructName: "main.MeshError",
+				Field: []*dwarf.StructField{
+					{Name: "Code", ByteOffset: 0, Type: &dwarf.IntType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{ByteSize: 8}}}},
+					{Name: "Detail", ByteOffset: 8, Type: iface},
 				},
 			},
 		},
+		WordCount: 1,
+		Captures:  1,
+		RuntimeType: func(uint64) (dwarf.Type, error) {
+			return &dwarf.PtrType{
+				CommonType: dwarf.CommonType{Name: "*errors.errorString", ByteSize: 8},
+				Type: &dwarf.StructType{
+					CommonType: dwarf.CommonType{Name: "errors.errorString", ByteSize: 16},
+					StructName: "errors.errorString",
+				},
+			}, nil
+		},
 	}
 	fetchArgs := []*uprobe.FetchArg{
-		{Varname: "ret0.Code"},
-		{Varname: "ret0.Detail.type"},
-		{Varname: "ret0.Detail.data"},
-		{Varname: "ret0.Detail.value"},
+		{Varname: "ret0"},
+		{Varname: "ret0.obj"},
 	}
 	up := uprobe.Uprobe{Funcname: "main.send", FetchArgs: fetchArgs, Values: []*uprobe.Value{meshError}}
 
 	var event bpf.GoftraceEvent
-	event.ArgCount = 4
-	binary.LittleEndian.PutUint64(event.Args[0].Data[:], 500)
-	binary.LittleEndian.PutUint64(event.Args[1].Data[:], 0x46f9c0)
-	binary.LittleEndian.PutUint64(event.Args[2].Data[:], 0xc0001000)
-	event.Args[3].ReadError = 1
+	event.ArgCount = 2
+	binary.LittleEndian.PutUint64(event.Args[0].Data[:], 0xc0001000)
+	binary.LittleEndian.PutUint64(event.Args[1].Data[:], 500)
+	binary.LittleEndian.PutUint64(event.Args[1].Data[8:], 0x46f9c0)
+	binary.LittleEndian.PutUint64(event.Args[1].Data[16:], 0xc0002000)
 
-	if got := renderEventArgs(up, event); got != "ret0=&main.MeshError{Code:500, Detail:<unavailable>}" {
+	if got := renderEventArgs(up, event); got != "ret0=&main.MeshError{Code:500, Detail:*errors.errorString(<unavailable>)}" {
 		t.Fatalf("renderEventArgs() = %q", got)
 	}
 }
@@ -61,7 +71,7 @@ func TestRenderEventArgsRejectsCountMismatch(t *testing.T) {
 			{Varname: "ret0.Code"},
 			{Varname: "ret0.Detail.type"},
 		},
-		Values: []*uprobe.Value{{Kind: uprobe.KindScalar, Name: "ret0", Typ: "s64", Size: 8}},
+		Values: []*uprobe.Value{{Name: "ret0", Type: &dwarf.IntType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{ByteSize: 8}}}, WordCount: 1}},
 	}
 	event := bpf.GoftraceEvent{ArgCount: 1}
 	binary.LittleEndian.PutUint64(event.Args[0].Data[:], 1)
@@ -248,10 +258,9 @@ func TestRenderEventArgsDoesNotReusePreviousLeafData(t *testing.T) {
 		Funcname:  "main.send",
 		FetchArgs: []*uprobe.FetchArg{{Varname: "ret0.Code"}},
 		Values: []*uprobe.Value{{
-			Kind: uprobe.KindScalar,
-			Name: "ret0.Code",
-			Typ:  "s64",
-			Size: 8,
+			Name:      "ret0.Code",
+			Type:      &dwarf.IntType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{ByteSize: 8}}},
+			WordCount: 1,
 		}},
 	}
 

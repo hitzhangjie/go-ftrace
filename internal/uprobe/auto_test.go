@@ -41,19 +41,15 @@ func buildFixture(t *testing.T, src string) string {
 // fetchArgString renders a FetchArg in the canonical <varname=(EA):type>
 // notation used by --fargs/--frets, e.g. "s.Name.data=(*+0(%ax)):c64".
 func fetchArgString(f *FetchArg) string {
-	reg := f.Rules[0].Register
-	var ea string
-	if len(f.Rules) == 1 {
-		ea = fmt.Sprintf("(%%%s)", reg)
-	} else {
-		r := f.Rules[1]
+	inner := "%" + f.Rules[0].Register
+	for _, r := range f.Rules[1:] {
 		deref := ""
 		if r.Dereference {
 			deref = "*"
 		}
-		ea = fmt.Sprintf("(%s+%d(%%%s))", deref, r.Offset, reg)
+		inner = fmt.Sprintf("%s+%d(%s)", deref, r.Offset, inner)
 	}
-	return fmt.Sprintf("%s=%s:%s", f.Varname, ea, f.Type)
+	return fmt.Sprintf("%s=(%s):%s", f.Varname, inner, f.Type)
 }
 
 func TestAutoFetchEntryArgs(t *testing.T) {
@@ -73,7 +69,7 @@ func TestAutoFetchEntryArgs(t *testing.T) {
 		},
 		{
 			fn:       "main.greet",
-			expected: []string{"name.data=(+0(%ax)):c512", "name.len=(%bx):s64"},
+			expected: []string{"name.data=(%ax):u64", "name.len=(%bx):s64", "name.str=(+0(%ax)):c512"},
 		},
 		{
 			fn:       "main.sum",
@@ -85,7 +81,7 @@ func TestAutoFetchEntryArgs(t *testing.T) {
 		},
 		{
 			fn:       "main.(*Student).String",
-			expected: []string{"s.Name.data=(*+0(%ax)):c512", "s.Name.len=(+8(%ax)):s64", "s.Age=(+16(%ax)):s64"},
+			expected: []string{"s=(%ax):u64", "s.obj=(+0(%ax)):c512", "s.Name.str=(*+0(%ax)):c512"},
 		},
 	}
 
@@ -121,8 +117,14 @@ func TestAutoFetchReturnValues(t *testing.T) {
 			expected: []string{"ret0.type=(+8(%ax)):u64", "ret0.data=(%bx):u64", "ret0.value=(+0(%bx)):c512"},
 		},
 		{
-			fn:       "main.send",
-			expected: []string{"ret0.Code=(+0(%ax)):s64", "ret0.Detail.type=(*+8(%ax)):u64", "ret0.Detail.data=(+16(%ax)):u64", "ret0.Detail.value=(*+16(%ax)):c512"},
+			fn: "main.send",
+			expected: []string{
+				"ret0=(%ax):u64",
+				"ret0.obj=(+0(%ax)):c512",
+				"ret0.Detail.type=(+8(*+0(+8(%ax)))):u64",
+				"ret0.Detail.data=(+8(+8(%ax))):u64",
+				"ret0.Detail.value=(*+8(+8(%ax))):c512",
+			},
 		},
 	}
 
@@ -141,16 +143,25 @@ func TestAutoFetchNilCheck(t *testing.T) {
 		t.Fatalf("elf.New: %v", err)
 	}
 
-	// main.send returns *MeshError: every flattened field must be marked for
-	// nil-checking so the value renders as nil when the pointer is nil.
+	// main.send returns *MeshError: every memory capture is a dereference of
+	// AX and must be nil-checked. The pointer word itself is a register read.
 	_, _, ra, _ := autoFetchArgs(e, "main.send")
-	if len(ra) == 0 {
-		t.Fatalf("no return args derived for main.send")
+	if len(ra) < 2 {
+		t.Fatalf("got %d return args for main.send, want at least 2", len(ra))
 	}
-	for _, a := range ra {
+	if ra[0].NilCheck {
+		t.Errorf("main.send pointer word %q: NilCheck = true, want false", ra[0].Varname)
+	}
+	for _, a := range ra[1:] {
 		if !a.NilCheck {
-			t.Errorf("main.send field %q: NilCheck = false, want true", a.Varname)
+			t.Errorf("main.send capture %q: NilCheck = false, want true", a.Varname)
 		}
+	}
+
+	// main.mayFail returns error: following itab+8 must not run when itab is nil.
+	_, _, ra, _ = autoFetchArgs(e, "main.mayFail")
+	if len(ra) < 1 || !ra[0].NilCheck {
+		t.Errorf("main.mayFail type word: NilCheck = false, want true so nil error is not read at address 8")
 	}
 
 	// main.add returns a plain int: no nil-checking.
@@ -167,26 +178,34 @@ func TestAutoFetchInterfaceLimits(t *testing.T) {
 		StructName: "runtime.iface",
 		Field:      []*dwarf.StructField{{Name: "tab"}, {Name: "data", ByteOffset: 8}},
 	}
-	fields := make([]*dwarf.StructField, 0, 7)
-	for i := 0; i < 6; i++ {
-		fields = append(fields, &dwarf.StructField{Name: fmt.Sprintf("F%d", i), ByteOffset: int64(i * 8), Type: intType})
-	}
-	fields = append(fields, &dwarf.StructField{Name: "Err", ByteOffset: 48, Type: ifaceType})
-	st := &dwarf.StructType{
-		CommonType: dwarf.CommonType{Name: "main.Result", ByteSize: 64},
-		StructName: "main.Result",
-		Field:      fields,
-	}
 
-	args, values := deriveArgs(nil, []*elf.Variable{{Name: "v", Type: st}})
-	if len(args) > MaxFetchArgs {
-		t.Fatalf("derived %d args, max is %d", len(args), MaxFetchArgs)
+	// 5 ints + interface = 7 ABI words + 1 probe-time *data prefix = 8.
+	fits := structWithIntsAndIface(intType, ifaceType, 5)
+	args, values := deriveArgs(nil, []*elf.Variable{{Name: "v", Type: fits}})
+	if len(args) != 8 {
+		t.Fatalf("5 ints + interface = 8 leaves, got %d args", len(args))
 	}
 	if len(values) != 1 || values[0].leafCount() != len(args) {
-		t.Fatalf("value tree leaves do not match args: values=%+v args=%d", values, len(args))
+		t.Fatalf("value leaves do not match args: values=%+v args=%d", values, len(args))
 	}
-	if len(args) != 6 {
-		t.Fatalf("partial interface should be skipped atomically: got %d args, want 6", len(args))
+
+	tooBig := structWithIntsAndIface(intType, ifaceType, 6)
+	args, values = deriveArgs(nil, []*elf.Variable{{Name: "v", Type: tooBig}})
+	if len(args) != 0 || len(values) != 0 {
+		t.Fatalf("9-leaf struct should be skipped atomically, got args=%d values=%d", len(args), len(values))
+	}
+}
+
+func structWithIntsAndIface(intType, ifaceType dwarf.Type, nints int) *dwarf.StructType {
+	fields := make([]*dwarf.StructField, 0, nints+1)
+	for i := 0; i < nints; i++ {
+		fields = append(fields, &dwarf.StructField{Name: fmt.Sprintf("F%d", i), ByteOffset: int64(i * 8), Type: intType})
+	}
+	fields = append(fields, &dwarf.StructField{Name: "Err", ByteOffset: int64(nints * 8), Type: ifaceType})
+	return &dwarf.StructType{
+		CommonType: dwarf.CommonType{Name: "main.Result", ByteSize: int64((nints + 2) * 8)},
+		StructName: "main.Result",
+		Field:      fields,
 	}
 }
 
@@ -203,13 +222,15 @@ func TestAutoFetchEmptyInterfaceInMemory(t *testing.T) {
 	}
 	ptr := &dwarf.PtrType{CommonType: dwarf.CommonType{Name: "*main.Outer", ByteSize: 8}, Type: outer}
 
-	args, _ := deriveArgs(nil, []*elf.Variable{{Name: "v", Type: ptr}})
-	if len(args) != 3 {
-		t.Fatalf("got %d args, want 3", len(args))
+	args, values := deriveArgs(nil, []*elf.Variable{{Name: "v", Type: ptr}})
+	if len(values) != 1 || values[0].WordCount != 1 || values[0].Captures < 1 {
+		t.Fatalf("value plan = %+v, want pointer word plus captures", values)
 	}
-	typeArg := args[0]
-	if len(typeArg.Rules) != 2 || typeArg.Rules[1].Offset != 8 || typeArg.Rules[1].Dereference {
-		t.Fatalf("empty-interface type rule = %+v, want direct memory read at +8", typeArg.Rules)
+	if len(args) != values[0].leafCount() {
+		t.Fatalf("got %d args, want %d", len(args), values[0].leafCount())
+	}
+	if len(args[0].Rules) != 1 || args[0].Rules[0].From != Register {
+		t.Fatalf("pointer rule = %+v, want a single register fetch", args[0].Rules)
 	}
 }
 
