@@ -305,7 +305,7 @@ bpf_get_current_task()
 
 随后 `bpf.Load` 通过 `spec.RewriteConstants` 把它们写入 eBPF 的只读 `CONFIG`。
 
-进程 ID 取自 `bpf_get_current_pid_tgid()` 的高 32 位，即 TGID。因为 goid 只在单个进程内有意义，所有跟踪状态都必须使用 `(pid, goid)` 而不是单独使用 goid。
+进程 ID 优先取 `bpf_get_ns_current_pid_tgid(ftrace 的 pid ns)` 返回的 TGID，这样用户态 `process_vm_readv` / `/proc/<pid>` 能在 WSL2（systemd 嵌套 pid namespace）或容器里解析到同一个进程。该 helper 不可用时回退到 `bpf_get_current_pid_tgid()` 的高 32 位（init namespace TGID）。因为 goid 只在单个进程内有意义，所有跟踪状态都必须使用 `(pid, goid)` 而不是单独使用 goid。WSL2 上接口返回值显示 `<unavailable>` 的排查过程见 [BPF 事件 PID 与 pid namespace](./BpfPidNamespace.zh_CN.md)。
 
 ## 8. eBPF 程序与状态机
 

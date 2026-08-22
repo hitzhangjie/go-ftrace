@@ -1,5 +1,9 @@
 # 常见问题
 
+### 为什么在 WSL2 上接口返回值会显示 `*errors.errorString(<unavailable>)`，而云主机上正常？
+
+不是 uprobe 没抓到返回值，也不是 ftrace 和被观测进程不在同一个 namespace。BPF helper `bpf_get_current_pid_tgid()` 给出的是 init pid namespace 的 TGID，用户态 `process_vm_readv` 却按当前 ns 的 PID 查找，两套编号在 WSL2（systemd 嵌套 pid ns）里对不上。完整排查、内核细节和修复见 [BPF 事件 PID 与 pid namespace](./BpfPidNamespace.zh_CN.md)。
+
 ### 为什么 `ftrace -u` 使用通配符而不是正则表达式？
 
 如果你频繁使用它，正则表达式并不像通配符那样方便。例如，如果存在 `main.fn1, main.fn2, main.fn3` 这几个函数，你想把它们全部跟踪，你可能会更喜欢 `-u main.fn*` 而不是 `-u main.fn.*`。

@@ -1,5 +1,9 @@
 ## Questions & Answers
 
+### why do interface return values show `*errors.errorString(<unavailable>)` on WSL2 but not on a cloud VM?
+
+The uprobe captured the value. `bpf_get_current_pid_tgid()` reports the init-namespace TGID, while userspace `process_vm_readv` looks up PIDs in the caller's namespace. With systemd-enabled WSL2 those numbers differ, even though ftrace and the target share the same namespace. Write-up (Chinese): [BPF 事件 PID 与 pid namespace](./BpfPidNamespace.zh_CN.md).
+
 ### why `ftrace -u` not using regexp instead of wildcards?
 
 Regexp isn't that convenient as wildcards if you use it frequently. For example, if there're functions `main.fn1, main.fn2, main.fn3`, then you want to trace them all, you may prefer `-u main.fn*` to `-u main.fn.*`.

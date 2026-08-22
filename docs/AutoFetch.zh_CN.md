@@ -638,7 +638,7 @@ Auto 展开接近 8 个叶子时会按复合类型所需叶子数做容量预留
 - Go DWARF 扩展属性 `DW_AT_go_runtime_type`；
 - runtime type header 中 DirectIface 标志的已知字节位置；
 - `itab.Type` 位于第二个指针 word；
-- 读取目标进程内存的权限。
+- 读取目标进程内存的权限（`process_vm_readv` 使用的 PID 必须是 ftrace 所在 pid namespace 中的编号，见 [BPF 事件 PID 与 pid namespace](./BpfPidNamespace.zh_CN.md)）。
 
 当前代码同时检查 Go 1.25 及以前的 Kind 标志位置和 Go 1.26 起的 TFlag 位置，但未来 Go 运行时布局变化仍可能需要同步适配。
 

@@ -214,6 +214,7 @@ func processMemoryReader(pid uint32) func(uint64, []byte) error {
 		local.SetLen(len(dst))
 		n, err := unix.ProcessVMReadv(int(pid), []unix.Iovec{local}, []unix.RemoteIovec{{Base: uintptr(addr), Len: len(dst)}}, 0)
 		if err != nil {
+			log.Debugf("process_vm_readv pid=%d addr=%#x len=%d: %v", pid, addr, len(dst), err)
 			return err
 		}
 		if n != len(dst) {

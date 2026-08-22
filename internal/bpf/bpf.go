@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/hitzhangjie/go-ftrace/internal/uprobe"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/semaphore"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -57,17 +59,39 @@ func New() *BPF {
 }
 
 func (b *BPF) BpfConfig(fetchArgs, adaptiveSampling bool, goidOffset, gOffset int64) interface{} {
+	dev, ino, err := currentPidNamespace()
+	if err != nil {
+		log.Warnf("cannot resolve pid namespace (%v); interface values may show <unavailable> in WSL2/containers", err)
+	}
 	return struct {
 		GoidOffset, GOffset int64
+		PidnsDev, PidnsIno  uint64
 		FetchArgs           bool
 		AdaptiveSampling    bool
 		Padding             [6]byte
 	}{
 		GoidOffset:       goidOffset,
 		GOffset:          gOffset,
+		PidnsDev:         dev,
+		PidnsIno:         ino,
 		FetchArgs:        fetchArgs,
 		AdaptiveSampling: adaptiveSampling,
 	}
+}
+
+// currentPidNamespace returns the device and inode of this process's pid
+// namespace, matching the arguments of bpf_get_ns_current_pid_tgid.
+func currentPidNamespace() (dev, ino uint64, err error) {
+	f, err := os.Open("/proc/self/ns/pid")
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close()
+	var st unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
+		return 0, 0, err
+	}
+	return uint64(st.Dev), uint64(st.Ino), nil
 }
 
 func (b *BPF) Load(uprobes []uprobe.Uprobe, opts LoadOptions) (err error) {

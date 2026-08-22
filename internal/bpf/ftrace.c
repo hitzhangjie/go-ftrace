@@ -29,6 +29,12 @@ struct config
 {
 	__s64 goid_offset;
 	__s64 g_offset;
+	// ftrace's pid namespace (from fstat(/proc/self/ns/pid)). Used with
+	// bpf_get_ns_current_pid_tgid so event.pid is the TGID that userspace
+	// process_vm_readv can look up. bpf_get_current_pid_tgid() returns the
+	// init-namespace IDs, which are wrong inside WSL2/systemd or containers.
+	__u64 pidns_dev;
+	__u64 pidns_ino;
 	bool fetch_args;
 	bool adaptive_sampling;
 	__u8 padding[6];
@@ -230,13 +236,20 @@ static __always_inline
 	return goid;
 }
 
-// get_pid returns the pid (tgid) of the current task. The upper 32 bits of
-// bpf_get_current_pid_tgid() hold the thread-group id, i.e. the process id
-// that identifies a userspace process instance.
+// get_pid returns the tgid of the current task as seen from ftrace's pid
+// namespace. Userspace uses this value with process_vm_readv / /proc/<pid>,
+// which resolve PIDs in the caller's namespace — not the kernel init ns.
 static __always_inline
 	__u32
 	get_pid()
 {
+	struct bpf_pidns_info ns = {};
+
+	if (CONFIG.pidns_dev && CONFIG.pidns_ino)
+	{
+		if (!bpf_get_ns_current_pid_tgid(CONFIG.pidns_dev, CONFIG.pidns_ino, &ns, sizeof(ns)) && ns.tgid)
+			return ns.tgid;
+	}
 	return bpf_get_current_pid_tgid() >> 32;
 }
 
