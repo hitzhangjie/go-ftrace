@@ -77,7 +77,9 @@ sudo ftrace -u 'main.send' ./testdata/rets/main
 `--fargs-auto` / `--frets-auto` can be turned off independently. A nil `error`
 prints as `nil`. The first hit of a new interface concrete type may show
 `<unavailable>` for nested bytes (the string inside `error`); the same type
-is captured in full on later hits. Details: [Auto-fetch design](./docs/AutoFetch.zh_CN.md).
+is captured in full on later hits. `--hide-unexported` (off by default) omits
+unexported struct fields, which is useful for generated types such as
+`proto.Message`. Details: [Auto-fetch design](./docs/AutoFetch.zh_CN.md).
 
 ## Manual fetch rules (optional)
 

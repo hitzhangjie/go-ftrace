@@ -72,8 +72,13 @@ func TestAutoFetchEntryArgs(t *testing.T) {
 			expected: []string{"name.data=(%ax):u64", "name.len=(%bx):s64", "name.str=(+0(%ax)):c512"},
 		},
 		{
-			fn:       "main.sum",
-			expected: []string{"nums.data=(%ax):u64", "nums.len=(%bx):s64", "nums.cap=(%cx):s64"},
+			fn: "main.sum",
+			expected: []string{
+				"nums.data=(%ax):u64",
+				"nums.len=(%bx):s64",
+				"nums.cap=(%cx):s64",
+				"nums.arr=(+0(%ax)):c512",
+			},
 		},
 		{
 			fn:       "main.toggle",
@@ -263,6 +268,118 @@ func TestFillAutoFetchPrecedence(t *testing.T) {
 	}
 	if len(retFetchArgs["main.add"]) == 0 {
 		t.Errorf("auto ret rules for main.add were not derived")
+	}
+}
+
+func TestAutoFetchProtoUnmarshalBinary(t *testing.T) {
+	bin := filepath.Join("..", "..", "examples", "trace_proto_unmarshal", "main")
+	if _, err := os.Stat(bin); err != nil {
+		t.Skip("example binary not built")
+	}
+	e, err := elf.New(bin)
+	if err != nil {
+		t.Fatalf("elf.New: %v", err)
+	}
+
+	ea, ev, _, _ := autoFetchArgs(e, "github.com/golang/protobuf/proto.Unmarshal")
+	if len(ev) != 2 {
+		t.Fatalf("Unmarshal values = %d, want 2 (slice + Message interface)", len(ev))
+	}
+	if ev[0].WordCount != 3 || ev[0].Captures != 1 {
+		t.Fatalf("Unmarshal []byte plan = words=%d captures=%d, want 3+1", ev[0].WordCount, ev[0].Captures)
+	}
+	if ev[1].WordCount != 2 || ev[1].Captures != 1 {
+		t.Fatalf("Unmarshal Message plan = words=%d captures=%d, want 2+1", ev[1].WordCount, ev[1].Captures)
+	}
+	assertArgs(t, "arg", ea, []string{
+		"b.data=(%ax):u64",
+		"b.len=(%bx):s64",
+		"b.cap=(%cx):s64",
+		"b.arr=(+0(%ax)):c512",
+		"m.type=(+8(%di)):u64",
+		"m.data=(%si):u64",
+		"m.value=(+0(%si)):c512",
+	})
+
+	mea, mev, mra, mrv := autoFetchArgs(e, "github.com/golang/protobuf/proto.Marshal")
+	if len(mev) != 1 || mev[0].WordCount != 2 || mev[0].Captures != 1 {
+		t.Fatalf("Marshal argument plan = %+v, want one interface", mev)
+	}
+	assertArgs(t, "arg", mea, []string{
+		"m.type=(+8(%ax)):u64",
+		"m.data=(%bx):u64",
+		"m.value=(+0(%bx)):c512",
+	})
+	if len(mrv) != 2 {
+		t.Fatalf("Marshal returns = %d, want []byte + error", len(mrv))
+	}
+	if mrv[0].WordCount != 3 || mrv[0].Captures != 1 {
+		t.Fatalf("Marshal []byte result plan = %+v", mrv[0])
+	}
+	if mrv[1].WordCount != 2 || mrv[1].Captures != 1 {
+		t.Fatalf("Marshal error plan = %+v", mrv[1])
+	}
+	assertArgs(t, "ret", mra, []string{
+		"ret0.data=(%ax):u64",
+		"ret0.len=(%bx):s64",
+		"ret0.cap=(%cx):s64",
+		"ret0.arr=(+0(%ax)):c512",
+		"ret1.type=(+8(%di)):u64",
+		"ret1.data=(%si):u64",
+		"ret1.value=(+0(%si)):c512",
+	})
+}
+
+func TestAutoFetchNamedInterfaceAndByteSlice(t *testing.T) {
+	uint8Type := &dwarf.UintType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{Name: "uint8", ByteSize: 1}}}
+	byteSlice := &dwarf.StructType{
+		CommonType: dwarf.CommonType{Name: "[]uint8", ByteSize: 24},
+		StructName: "[]uint8",
+		Field: []*dwarf.StructField{
+			{Name: "array", ByteOffset: 0, Type: ptrType("*uint8", uint8Type)},
+			{Name: "len", ByteOffset: 8, Type: intType("int")},
+			{Name: "cap", ByteOffset: 16, Type: intType("int")},
+		},
+	}
+	namedIface := &dwarf.TypedefType{
+		CommonType: dwarf.CommonType{Name: "proto.Message", ByteSize: 16},
+		Type: &dwarf.TypedefType{
+			CommonType: dwarf.CommonType{Name: "runtime.iface", ByteSize: 16},
+			Type:       ifaceType(),
+		},
+	}
+
+	args, values := deriveArgs(nil, []*elf.Variable{
+		{Name: "b", Type: byteSlice},
+		{Name: "m", Type: namedIface},
+	})
+	want := []string{
+		"b.data=(%ax):u64",
+		"b.len=(%bx):s64",
+		"b.cap=(%cx):s64",
+		"b.arr=(+0(%ax)):c512",
+		"m.type=(+8(%di)):u64",
+		"m.data=(%si):u64",
+		"m.value=(+0(%si)):c512",
+	}
+	assertArgs(t, "arg", args, want)
+	if len(values) != 2 {
+		t.Fatalf("got %d values, want 2 (slice + named interface)", len(values))
+	}
+	if values[0].WordCount != 3 || values[0].Captures != 1 {
+		t.Fatalf("slice plan = %+v, want 3 words + backing array", values[0])
+	}
+	if values[1].WordCount != 2 || values[1].Captures != 1 {
+		t.Fatalf("interface plan = %+v, want 2 words + *data prefix", values[1])
+	}
+	if !args[3].NilCheck {
+		t.Fatal("slice backing array must nil-check a possibly-empty data pointer")
+	}
+	if !args[4].NilCheck {
+		t.Fatal("named non-empty interface type word must nil-check itab")
+	}
+	if !args[5].IfaceData || args[5].TypeIndex != 4 {
+		t.Fatalf("interface data slot = %+v, want IfaceData with type index 4", args[5])
 	}
 }
 

@@ -220,8 +220,9 @@ func (c *flatCtx) runtimeType() func(uint64) (dwarf.Type, error) {
 }
 
 // planValue compiles dwarf.Type into ABI-word fetches plus probe-time memory
-// captures for anything rendering will dereference (string bytes, *T objects,
-// interface concrete values, one extra pointer chase for unknown dynamic types).
+// captures for anything rendering will dereference (string/slice bytes, *T
+// objects, interface concrete values, one extra pointer chase for unknown
+// dynamic types).
 func planValue(t dwarf.Type, name string, c *flatCtx) *Value {
 	orig := t
 	t = underlying(t)
@@ -269,7 +270,7 @@ func planValue(t dwarf.Type, name string, c *flatCtx) *Value {
 			return &Value{Name: name, Type: orig, WordCount: 2, Captures: 1, RuntimeType: rt}
 
 		case isSlice(tt):
-			if !c.reserve(3) {
+			if !c.reserve(4) {
 				return nil
 			}
 			data := c.nextWord()
@@ -281,7 +282,8 @@ func planValue(t dwarf.Type, name string, c *flatCtx) *Value {
 			c.out = append(c.out, scalarRegSpec(name+".data", 8, "u64", data))
 			c.out = append(c.out, scalarRegSpec(name+".len", 8, "s64", ln))
 			c.out = append(c.out, scalarRegSpec(name+".cap", 8, "s64", cap))
-			return &Value{Name: name, Type: orig, WordCount: 3, RuntimeType: rt}
+			c.out = append(c.out, blobAt(name+".arr", memLoc{reg: data, nilCheck: true}))
+			return &Value{Name: name, Type: orig, WordCount: 3, Captures: 1, RuntimeType: rt}
 
 		case isInterface(tt):
 			if !c.reserve(3) {
@@ -357,7 +359,7 @@ func emitABI(t dwarf.Type, name string, c *flatCtx) []captureJob {
 			c.out = append(c.out, scalarRegSpec(name+".data", 8, "u64", data))
 			c.out = append(c.out, scalarRegSpec(name+".len", 8, "s64", ln))
 			c.out = append(c.out, scalarRegSpec(name+".cap", 8, "s64", cap))
-			return nil
+			return []captureJob{{name: name + ".arr", typ: tt, loc: memLoc{reg: data, nilCheck: true}}}
 		case isInterface(tt):
 			typeReg := c.nextWord()
 			dataReg := c.nextWord()
@@ -401,6 +403,8 @@ func emitRegCaptures(job captureJob, c *flatCtx) {
 	switch {
 	case isString(st):
 		c.out = append(c.out, blobAt(job.name, job.loc))
+	case isSlice(st):
+		c.out = append(c.out, blobAt(job.name, job.loc))
 	case isInterface(st):
 		c.out = append(c.out, blobAt(job.name+".value", job.loc))
 	}
@@ -416,7 +420,7 @@ func emitMemCaptures(t dwarf.Type, name string, loc memLoc, c *flatCtx) {
 	case isString(st):
 		c.out = append(c.out, blobAt(name+".str", loc.deref(0)))
 	case isSlice(st):
-		return
+		c.out = append(c.out, blobAt(name+".arr", loc.deref(0)))
 	case isInterface(st):
 		if interfaceIsNonEmpty(st) {
 			c.out = append(c.out, locSpec(name+".type", loc.deref(0).add(8), 8, "u64"))
@@ -443,7 +447,7 @@ func extraCaptures(t dwarf.Type, inMemory bool) int {
 	case isString(st):
 		return 1
 	case isSlice(st):
-		return 0
+		return 1
 	case isInterface(st):
 		if !inMemory {
 			return 1 // *data prefix; type+data are ABI words

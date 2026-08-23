@@ -47,9 +47,10 @@ type EventManager struct {
 	elf     *elf.ELF
 	uprobes map[string]uprobe.Uprobe
 
-	drilldown  string
-	trimprefix string
-	aggregate  bool
+	drilldown      string
+	trimprefix     string
+	aggregate      bool
+	hideUnexported bool
 
 	// adaptive enables the memory backpressure applied in every mode: root-call
 	// sampling (with the denominator driven by userspace heap usage), a hard cap
@@ -83,6 +84,12 @@ type EventManager struct {
 
 // SetTypeLearner registers a callback that installs extra probe-time copies
 // for a newly observed interface concrete type (keyed by runtime type address).
+// SetHideUnexported controls whether auto-fetched struct values omit
+// unexported fields when printed. Capture is unchanged.
+func (m *EventManager) SetHideUnexported(v bool) {
+	m.hideUnexported = v
+}
+
 func (m *EventManager) SetTypeLearner(fn func(uint64, dwarf.Type) error) {
 	m.learnType = fn
 	if m.typeRecipes == nil {

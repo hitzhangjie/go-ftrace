@@ -44,7 +44,9 @@ func relMemCaptures(t dwarf.Type, steps []ArgRule) []RelRule {
 	switch {
 	case isString(st):
 		return []RelRule{{Size: autoStringSize, Steps: appendStep(steps, 0, true)}}
-	case isSlice(st), isInterface(st):
+	case isSlice(st):
+		return []RelRule{{Size: autoStringSize, Steps: appendStep(steps, 0, true)}}
+	case isInterface(st):
 		return nil
 	default:
 		var out []RelRule

@@ -167,7 +167,7 @@ ret0.Detail.value=(*+8(+8(%ax))):c512       // *data 前缀
 | 整数、布尔、枚举 | 一个寄存器 word |
 | 普通指针 / map / chan / func | 一个寄存器，只显示地址或 nil |
 | `string` | data、len 两个 ABI word，再探针时拷 backing array 最多 64 字节 |
-| slice | data / len / cap，只显示头部 |
+| slice | data / len / cap，再探针时拷 backing array 最多 64 字节；`[]byte`/`[]uint8` 按 `string(data)` 加引号显示 |
 | struct 值 | 按 ABI 消费若干寄存器 word，渲染时按字段偏移散射成内存镜像 |
 | `*struct` | 指针 word + 对象前缀（`NilCheck`）+ 类型里能确定的嵌套捕获（如内部 string 的 backing array、内部 interface 的 type/data/`*data`） |
 | interface | type（非空接口从 itab+8 取 `_type`，带 `NilCheck`）、data、`*data` 前缀。具体类型的深层字段见第 7 节 |
@@ -239,8 +239,9 @@ ret0=nil
 ## 10. Auto 与手动规则的关系
 
 ```text
--A, --fargs-auto   默认开；自动推导入口参数
--R, --frets-auto   默认开；自动推导返回值
+-A, --fargs-auto       默认开；自动推导入口参数
+-R, --frets-auto       默认开；自动推导返回值
+    --hide-unexported  默认关；打印时隐藏未导出结构体字段（抓取不变）
 ```
 
 `fillAutoFetch`：某个函数、某个方向已有显式规则时不覆盖该方向。CLI 更强：命令行只要出现任意 `--fargs`，本次运行入口 auto 整体关闭；出现任意 `--frets`，返回 auto 整体关闭。两个方向互不影响。

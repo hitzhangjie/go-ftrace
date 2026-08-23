@@ -27,7 +27,6 @@ func (m *EventManager) Handle(event bpf.GoftraceEvent) error {
 	if !m.Add(event) {
 		return nil
 	}
-	log.Debugf("added event: %+v", event)
 	if m.CloseStack(event) {
 		// 有错没错都要清空栈
 		defer m.ClearStack(event)
@@ -138,7 +137,7 @@ func (m *EventManager) Add(event bpf.GoftraceEvent) bool {
 		}
 	}
 
-	argString := renderEventArgsRecipes(probe, event, m.typeRecipes)
+	argString := renderEventArgsRecipes(probe, event, m.typeRecipes, m.hideUnexported)
 	m.learnInterfaceTypes(probe, event)
 	s.goEvents[event.Goid] = append(s.goEvents[event.Goid], Event{
 		GoftraceEvent: event,
@@ -167,10 +166,10 @@ func (m *EventManager) updateObservedStack(s *pidState, event bpf.GoftraceEvent,
 }
 
 func renderEventArgs(uprobe up.Uprobe, event bpf.GoftraceEvent) string {
-	return renderEventArgsRecipes(uprobe, event, nil)
+	return renderEventArgsRecipes(uprobe, event, nil, false)
 }
 
-func renderEventArgsRecipes(uprobe up.Uprobe, event bpf.GoftraceEvent, recipes map[uint64][]up.RelRule) string {
+func renderEventArgsRecipes(uprobe up.Uprobe, event bpf.GoftraceEvent, recipes map[uint64][]up.RelRule, hideUnexported bool) string {
 	expected := len(uprobe.FetchArgs)
 	actual := int(event.ArgCount)
 	if actual < expected || actual > len(event.Args) {
@@ -189,7 +188,7 @@ func renderEventArgsRecipes(uprobe up.Uprobe, event bpf.GoftraceEvent, recipes m
 	}
 
 	if len(uprobe.Values) > 0 {
-		return up.RenderValuesRecipes(uprobe.Values, leafData, recipes)
+		return up.RenderValuesOpts(uprobe.Values, leafData, recipes, up.RenderOpts{HideUnexported: hideUnexported})
 	}
 
 	args := make([]string, 0, actual)

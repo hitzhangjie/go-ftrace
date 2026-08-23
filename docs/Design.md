@@ -112,6 +112,7 @@ flowchart LR
 | `-r, --frets` | 显式指定函数返回值抓取规则 |
 | `-A, --fargs-auto` | 默认开启；自动推导入口参数规则 |
 | `-R, --frets-auto` | 默认开启；自动推导返回值规则 |
+| `--hide-unexported` | 默认关闭；打印自动抓取的结构体时隐藏未导出字段 |
 | `-D, --drilldown` | 仅打印根函数名与指定值相同的闭合调用栈 |
 | `-P, --trimprefix` | 去掉输出源码路径的公共前缀 |
 | `-c, --aggregate` | 不逐条打印，改为聚合函数耗时和返回值；动态采样与有界内存保护在所有模式下均启用 |
@@ -253,7 +254,7 @@ main.(*Student).String(
 | --- | --- |
 | 整数、布尔、枚举、普通指针 | 一个整数寄存器 word，用户态按 `dwarf.Type` 解码 |
 | `string` | data/len 两个 ABI word，探针时拷 backing array 最多 64 字节 |
-| slice | `.data/.len/.cap`，只显示头部 |
+| slice | `.data/.len/.cap`，探针时拷 backing array 最多 64 字节；`[]byte` 按字符串显示 |
 | interface | 通用：type/data/`*data` 前缀；见到具体 `_type` 后再学相对规则 |
 | struct | 按 ABI 抓 word，渲染时按字段偏移还原 |
 | `*struct` | 指针 + 对象前缀 + 静态可确定的嵌套捕获；`NilCheck` |

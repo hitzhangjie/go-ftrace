@@ -13,6 +13,14 @@ func u64data(v uint64) LeafData {
 	return LeafData{Data: b[:]}
 }
 
+// paddedU64 mimics a BPF arg_data slot: the ABI word lives in the first
+// 8 bytes of a MAX_DATA_SIZE buffer, the rest is zero padding.
+func paddedU64(v uint64) LeafData {
+	b := make([]byte, autoStringSize)
+	binary.LittleEndian.PutUint64(b, v)
+	return LeafData{Data: b}
+}
+
 func intType(name string) dwarf.Type {
 	return &dwarf.IntType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{Name: name, ByteSize: 8}}}
 }
@@ -42,6 +50,19 @@ func sliceType(name string) dwarf.Type {
 		StructName: name,
 		Field: []*dwarf.StructField{
 			{Name: "array", ByteOffset: 0},
+			{Name: "len", ByteOffset: 8, Type: intType("int")},
+			{Name: "cap", ByteOffset: 16, Type: intType("int")},
+		},
+	}
+}
+
+func byteSliceType() dwarf.Type {
+	elem := &dwarf.UintType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{Name: "uint8", ByteSize: 1}}}
+	return &dwarf.StructType{
+		CommonType: dwarf.CommonType{Name: "[]uint8", ByteSize: 24},
+		StructName: "[]uint8",
+		Field: []*dwarf.StructField{
+			{Name: "array", ByteOffset: 0, Type: ptrType("*uint8", elem)},
 			{Name: "len", ByteOffset: 8, Type: intType("int")},
 			{Name: "cap", ByteOffset: 16, Type: intType("int")},
 		},
@@ -160,6 +181,23 @@ func TestRenderValues(t *testing.T) {
 			want:   "nums=[]int(len=3, cap=5)",
 		},
 		{
+			name:   "slice-padded-bpf-leaves",
+			values: []*Value{{Name: "b", Type: sliceType("[]uint8"), WordCount: 3}},
+			data:   []LeafData{paddedU64(0xc000136690), paddedU64(13), paddedU64(13)},
+			want:   "b=[]uint8(len=13, cap=13)",
+		},
+		{
+			name:   "byte-slice-payload",
+			values: []*Value{{Name: "b", Type: byteSliceType(), WordCount: 3, Captures: 1}},
+			data: []LeafData{
+				u64data(0x1000),
+				u64data(13),
+				u64data(13),
+				blobData([]byte{10, 11, 'h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd'}),
+			},
+			want: `b=[]uint8(len=13, cap=13, "\n\vhello world")`,
+		},
+		{
 			name:   "interface-nil",
 			values: []*Value{{Name: "err", Type: ifaceType(), WordCount: 2, Captures: 1}},
 			data:   []LeafData{u64data(0), u64data(0), {IsNil: true}},
@@ -202,6 +240,44 @@ func TestRenderValues(t *testing.T) {
 				return []LeafData{u64data(0x1234), u64data(0x5678), blobData(value), emptyBlob()}
 			}(),
 			want: "err=main.MeshError{Code:500, Retry:true}",
+		},
+		{
+			name: "interface-padded-bpf-leaves",
+			values: []*Value{{
+				Name:      "m",
+				Type:      ifaceType(),
+				WordCount: 2,
+				Captures:  1,
+				RuntimeType: func(addr uint64) (dwarf.Type, error) {
+					st := &dwarf.StructType{
+						CommonType: dwarf.CommonType{Name: "pb.HelloRequest", ByteSize: 16},
+						StructName: "pb.HelloRequest",
+						Field:      []*dwarf.StructField{{Name: "Msg", Type: stringType()}},
+					}
+					return ptrType("*pb.HelloRequest", st), nil
+				},
+			}},
+			data: func() []LeafData {
+				obj := make([]byte, autoStringSize)
+				binary.LittleEndian.PutUint64(obj, 0x2000)
+				binary.LittleEndian.PutUint64(obj[8:], 0)
+				return []LeafData{paddedU64(0x1234), paddedU64(0xc0005000), blobData(obj)}
+			}(),
+			want: `m=&pb.HelloRequest{Msg:""}`,
+		},
+		{
+			name: "interface-typed-nil-pointer",
+			values: []*Value{{
+				Name:      "m",
+				Type:      ifaceType(),
+				WordCount: 2,
+				Captures:  1,
+				RuntimeType: func(uint64) (dwarf.Type, error) {
+					return ptrType("*pb.HelloRequest", &dwarf.StructType{StructName: "pb.HelloRequest"}), nil
+				},
+			}},
+			data: []LeafData{u64data(0x1234), u64data(0), {IsNil: true}},
+			want: "m=(*pb.HelloRequest)(nil)",
 		},
 		{
 			name: "interface-direct-pointer",
@@ -334,6 +410,65 @@ func TestRenderValues(t *testing.T) {
 				t.Errorf("RenderValues() = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+func TestRenderValuesHideUnexported(t *testing.T) {
+	hello := &dwarf.StructType{
+		CommonType: dwarf.CommonType{Name: "pb.HelloRequest", ByteSize: 24},
+		StructName: "pb.HelloRequest",
+		Field: []*dwarf.StructField{
+			{Name: "state", ByteOffset: 0, Type: intType("int")},
+			{Name: "Msg", ByteOffset: 8, Type: stringType()},
+		},
+	}
+	obj := make([]byte, autoStringSize)
+	binary.LittleEndian.PutUint64(obj, 99)
+	binary.LittleEndian.PutUint64(obj[8:], 0x2000)
+	binary.LittleEndian.PutUint64(obj[16:], uint64(len("hello world")))
+	v := &Value{
+		Name:      "m",
+		Type:      ptrType("*pb.HelloRequest", hello),
+		WordCount: 1,
+		Captures:  2,
+	}
+	data := []LeafData{
+		u64data(0xc0001000),
+		blobData(obj),
+		blobData([]byte("hello world")),
+	}
+
+	gotAll := RenderValues([]*Value{v}, data)
+	wantAll := `m=&pb.HelloRequest{state:99, Msg:"hello world"}`
+	if gotAll != wantAll {
+		t.Fatalf("default = %q, want %q", gotAll, wantAll)
+	}
+
+	gotHide := RenderValuesOpts([]*Value{v}, data, nil, RenderOpts{HideUnexported: true})
+	wantHide := `m=&pb.HelloRequest{Msg:"hello world"}`
+	if gotHide != wantHide {
+		t.Fatalf("hide-unexported = %q, want %q", gotHide, wantHide)
+	}
+
+	errStr := &Value{
+		Name:      "err",
+		Type:      ptrType("*errors.errorString", errorStringType()),
+		WordCount: 1,
+		Captures:  2,
+	}
+	errObj := make([]byte, autoStringSize)
+	binary.LittleEndian.PutUint64(errObj, 0x3000)
+	binary.LittleEndian.PutUint64(errObj[8:], uint64(len("boom")))
+	errData := []LeafData{
+		u64data(0xc0002000),
+		blobData(errObj),
+		blobData([]byte("boom")),
+	}
+	if got := RenderValues([]*Value{errStr}, errData); got != `err=&errors.errorString{s:"boom"}` {
+		t.Fatalf("errorString default = %q", got)
+	}
+	if got := RenderValuesOpts([]*Value{errStr}, errData, nil, RenderOpts{HideUnexported: true}); got != "err=&errors.errorString{}" {
+		t.Fatalf("errorString hide-unexported = %q", got)
 	}
 }
 

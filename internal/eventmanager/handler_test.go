@@ -64,6 +64,131 @@ func TestRenderEventArgsKeepsLeavesAtomic(t *testing.T) {
 	}
 }
 
+func TestRenderEventArgsSliceAndNamedInterfaceFromPaddedLeaves(t *testing.T) {
+	uint8Type := &dwarf.UintType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{Name: "uint8", ByteSize: 1}}}
+	byteSlice := &dwarf.StructType{
+		CommonType: dwarf.CommonType{Name: "[]uint8", ByteSize: 24},
+		StructName: "[]uint8",
+		Field: []*dwarf.StructField{
+			{Name: "array", ByteOffset: 0, Type: &dwarf.PtrType{Type: uint8Type}},
+			{Name: "len", ByteOffset: 8, Type: &dwarf.IntType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{ByteSize: 8}}}},
+			{Name: "cap", ByteOffset: 16, Type: &dwarf.IntType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{ByteSize: 8}}}},
+		},
+	}
+	iface := &dwarf.TypedefType{
+		CommonType: dwarf.CommonType{Name: "proto.Message", ByteSize: 16},
+		Type: &dwarf.StructType{
+			CommonType: dwarf.CommonType{Name: "runtime.iface", ByteSize: 16},
+			StructName: "runtime.iface",
+			Field: []*dwarf.StructField{
+				{Name: "tab", ByteOffset: 0},
+				{Name: "data", ByteOffset: 8},
+			},
+		},
+	}
+	hello := &dwarf.StructType{
+		CommonType: dwarf.CommonType{Name: "pb.HelloRequest", ByteSize: 16},
+		StructName: "pb.HelloRequest",
+		Field: []*dwarf.StructField{{
+			Name: "Msg",
+			Type: &dwarf.StructType{
+				CommonType: dwarf.CommonType{Name: "string", ByteSize: 16},
+				StructName: "string",
+				Field: []*dwarf.StructField{
+					{Name: "str", ByteOffset: 0},
+					{Name: "len", ByteOffset: 8, Type: &dwarf.IntType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{ByteSize: 8}}}},
+				},
+			},
+		}},
+	}
+
+	up := uprobe.Uprobe{
+		Funcname: "proto.Unmarshal",
+		FetchArgs: []*uprobe.FetchArg{
+			{Varname: "b.data"},
+			{Varname: "b.len"},
+			{Varname: "b.cap"},
+			{Varname: "b.arr"},
+			{Varname: "m.type"},
+			{Varname: "m.data", IfaceData: true, TypeIndex: 4},
+			{Varname: "m.value"},
+		},
+		Values: []*uprobe.Value{
+			{Name: "b", Type: byteSlice, WordCount: 3, Captures: 1},
+			{
+				Name:      "m",
+				Type:      iface,
+				WordCount: 2,
+				Captures:  1,
+				RuntimeType: func(uint64) (dwarf.Type, error) {
+					return &dwarf.PtrType{
+						CommonType: dwarf.CommonType{Name: "*pb.HelloRequest", ByteSize: 8},
+						Type:       hello,
+					}, nil
+				},
+			},
+		},
+	}
+
+	var event bpf.GoftraceEvent
+	event.ArgCount = 7
+	binary.LittleEndian.PutUint64(event.Args[0].Data[:], 0xc000136690)
+	binary.LittleEndian.PutUint64(event.Args[1].Data[:], 13)
+	binary.LittleEndian.PutUint64(event.Args[2].Data[:], 13)
+	copy(event.Args[3].Data[:], []byte{10, 11, 'h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd'})
+	binary.LittleEndian.PutUint64(event.Args[4].Data[:], 0x1234)
+	binary.LittleEndian.PutUint64(event.Args[5].Data[:], 0xc0005000)
+	// HelloRequest.Msg is a zero string: data pointer and len are 0.
+
+	got := renderEventArgs(up, event)
+	want := `b=[]uint8(len=13, cap=13, "\n\vhello world"), m=&pb.HelloRequest{Msg:""}`
+	if got != want {
+		t.Fatalf("renderEventArgs() = %q, want %q", got, want)
+	}
+}
+
+func TestRenderEventArgsHideUnexported(t *testing.T) {
+	hello := &dwarf.StructType{
+		CommonType: dwarf.CommonType{Name: "pb.HelloRequest", ByteSize: 24},
+		StructName: "pb.HelloRequest",
+		Field: []*dwarf.StructField{
+			{Name: "state", ByteOffset: 0, Type: &dwarf.IntType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{ByteSize: 8}}}},
+			{Name: "Msg", ByteOffset: 8, Type: &dwarf.StructType{
+				CommonType: dwarf.CommonType{Name: "string", ByteSize: 16},
+				StructName: "string",
+				Field: []*dwarf.StructField{
+					{Name: "str", ByteOffset: 0},
+					{Name: "len", ByteOffset: 8, Type: &dwarf.IntType{BasicType: dwarf.BasicType{CommonType: dwarf.CommonType{ByteSize: 8}}}},
+				},
+			}},
+		},
+	}
+	up := uprobe.Uprobe{
+		Funcname:  "proto.Unmarshal",
+		FetchArgs: []*uprobe.FetchArg{{Varname: "m"}, {Varname: "m.obj"}, {Varname: "m.Msg.str"}},
+		Values: []*uprobe.Value{{
+			Name:      "m",
+			Type:      &dwarf.PtrType{CommonType: dwarf.CommonType{Name: "*pb.HelloRequest", ByteSize: 8}, Type: hello},
+			WordCount: 1,
+			Captures:  2,
+		}},
+	}
+	var event bpf.GoftraceEvent
+	event.ArgCount = 3
+	binary.LittleEndian.PutUint64(event.Args[0].Data[:], 0xc0001000)
+	binary.LittleEndian.PutUint64(event.Args[1].Data[:], 99)
+	binary.LittleEndian.PutUint64(event.Args[1].Data[8:], 0x2000)
+	binary.LittleEndian.PutUint64(event.Args[1].Data[16:], 5)
+	copy(event.Args[2].Data[:], []byte("hello"))
+
+	if got := renderEventArgsRecipes(up, event, nil, false); got != `m=&pb.HelloRequest{state:99, Msg:"hello"}` {
+		t.Fatalf("default = %q", got)
+	}
+	if got := renderEventArgsRecipes(up, event, nil, true); got != `m=&pb.HelloRequest{Msg:"hello"}` {
+		t.Fatalf("hide-unexported = %q", got)
+	}
+}
+
 func TestRenderEventArgsRejectsCountMismatch(t *testing.T) {
 	up := uprobe.Uprobe{
 		Funcname: "main.send",

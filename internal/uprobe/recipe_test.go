@@ -22,6 +22,16 @@ func TestCompileTypeRecipeIntHasNoExtras(t *testing.T) {
 	}
 }
 
+func TestCompileTypeRecipeByteSlice(t *testing.T) {
+	rules := CompileTypeRecipe(byteSliceType())
+	if len(rules) != 1 {
+		t.Fatalf("got %d rules, want 1 (slice backing array)", len(rules))
+	}
+	if len(rules[0].Steps) != 1 || !rules[0].Steps[0].Dereference || rules[0].Steps[0].Offset != 0 {
+		t.Fatalf("steps=%+v, want a single deref at offset 0", rules[0].Steps)
+	}
+}
+
 func TestMarkIfaceSlots(t *testing.T) {
 	args := []*FetchArg{
 		{Varname: "ret0.type"},

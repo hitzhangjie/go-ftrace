@@ -80,7 +80,7 @@ sudo ftrace -u 'main.send' ./testdata/rets/main
 22 12:25:22.1226 000.0000  } main.send+282 => ret0=&main.MeshError{Code:500, Detail:&errors.errorString{s:"send failed"}} testdata/rets/main.go:119
 ```
 
-`--fargs-auto` / `--frets-auto` 可分别关闭。nil 的 `error` 显示为 `nil`。某种接口具体类型第一次出现时，嵌套字节（例如 `error` 里的字符串）可能是 `<unavailable>`，同类型后续命中会拷全。原理见 [Auto 模式原理：从 DWARF 类型到探针时快照](./docs/AutoFetch.zh_CN.md)。
+`--fargs-auto` / `--frets-auto` 可分别关闭。nil 的 `error` 显示为 `nil`。某种接口具体类型第一次出现时，嵌套字节（例如 `error` 里的字符串）可能是 `<unavailable>`，同类型后续命中会拷全。`--hide-unexported`（默认关闭）打印时隐藏未导出结构体字段，适合 `proto.Message` 这类生成类型。原理见 [Auto 模式原理：从 DWARF 类型到探针时快照](./docs/AutoFetch.zh_CN.md)。
 
 ## 手写 fetch 规则（可选）
 

@@ -78,6 +78,7 @@ var rootCmd = &cobra.Command{
 		frets, _ := cmd.Flags().GetStringArray("frets")
 		autoFetchArgs, _ := cmd.Flags().GetBool("fargs-auto")
 		autoFetchRets, _ := cmd.Flags().GetBool("frets-auto")
+		hideUnexported, _ := cmd.Flags().GetBool("hide-unexported")
 
 		// An explicitly provided --fargs/--frets rule takes precedence over the
 		// corresponding automatic DWARF derivation, so disable auto-fetch when
@@ -107,6 +108,7 @@ var rootCmd = &cobra.Command{
 			trimprefix:        trimprefix,
 			autoFetchArgs:     autoFetchArgs,
 			autoFetchRets:     autoFetchRets,
+			hideUnexported:    hideUnexported,
 			aggregate:         aggregate,
 			aggregateInterval: aggregateInterval,
 			memoryLimitMB:     memoryLimitMB,
@@ -135,6 +137,12 @@ func Execute() {
 }
 
 func init() {
+	log.SetFormatter(&log.TextFormatter{
+		DisableLevelTruncation: true,
+		FullTimestamp:          true,
+		TimestampFormat:        "15:04:05.000",
+	})
+
 	// Here you will define your flags and configuration settings.
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.
@@ -155,6 +163,7 @@ func init() {
 	rootCmd.Flags().StringArrayP("frets", "r", nil, "fetch return values, e.g. 'main.(*T).M(err=(*+0(%ax)):s64)'")
 	rootCmd.Flags().BoolP("fargs-auto", "A", true, "derive entry-argument rules from DWARF when no --fargs is given")
 	rootCmd.Flags().BoolP("frets-auto", "R", true, "derive return-value rules from DWARF when no --frets is given")
+	rootCmd.Flags().Bool("hide-unexported", false, "omit unexported struct fields when printing auto-fetched values")
 	rootCmd.Flags().Bool("aggregate", false, "aggregate per-function latency and top-10 return values instead of printing every call")
 	rootCmd.Flags().Duration("aggregate-interval", 3*time.Second, "interval for periodic aggregate summary; 0 prints only on exit")
 	rootCmd.Flags().Uint64("memory-limit", 256, "Go heap target (MiB) for adaptive backpressure")

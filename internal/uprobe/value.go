@@ -4,6 +4,7 @@ import (
 	"debug/dwarf"
 	"encoding/binary"
 	"fmt"
+	"go/token"
 	"math"
 	"strconv"
 	"strings"
@@ -47,6 +48,15 @@ type LeafData struct {
 	Unavailable bool
 }
 
+// RenderOpts controls how auto-fetched values are printed. Capture is
+// unchanged; these flags only affect userspace rendering.
+type RenderOpts struct {
+	// HideUnexported omits struct fields whose names are not exported in Go
+	// (first letter not uppercase). Useful for generated types such as
+	// protobuf messages with state/unknownFields/sizeCache.
+	HideUnexported bool
+}
+
 // RenderValues renders a list of top-level values into a single
 // comma-separated, debugger-style string. data must provide one LeafData per
 // leaf in fetch order (the same order as the compiled FetchArgs).
@@ -57,6 +67,11 @@ func RenderValues(values []*Value, data []LeafData) string {
 // RenderValuesRecipes is RenderValues plus type-specialized extra leaves that
 // BPF appended after the generic snapshot (see type_recipes_map).
 func RenderValuesRecipes(values []*Value, data []LeafData, recipes map[uint64][]RelRule) string {
+	return RenderValuesOpts(values, data, recipes, RenderOpts{})
+}
+
+// RenderValuesOpts is RenderValuesRecipes with display options.
+func RenderValuesOpts(values []*Value, data []LeafData, recipes map[uint64][]RelRule, opts RenderOpts) string {
 	generic := 0
 	for _, v := range values {
 		generic += v.leafCount()
@@ -65,12 +80,12 @@ func RenderValuesRecipes(values []*Value, data []LeafData, recipes map[uint64][]
 	cur := 0
 	parts := make([]string, 0, len(values))
 	for _, v := range values {
-		parts = append(parts, v.Name+"="+renderAuto(v, data, &cur, data, &extraCur, recipes))
+		parts = append(parts, v.Name+"="+renderAuto(v, data, &cur, data, &extraCur, recipes, opts))
 	}
 	return strings.Join(parts, ", ")
 }
 
-func renderAuto(v *Value, data []LeafData, cur *int, all []LeafData, extraCur *int, recipes map[uint64][]RelRule) string {
+func renderAuto(v *Value, data []LeafData, cur *int, all []LeafData, extraCur *int, recipes map[uint64][]RelRule, opts RenderOpts) string {
 	n := v.leafCount()
 	if n == 0 || *cur+n > len(data) {
 		if n > 0 {
@@ -124,7 +139,7 @@ func renderAuto(v *Value, data []LeafData, cur *int, all []LeafData, extraCur *i
 			snap.put(ptr, captures[0])
 			consumeMemCaptures(pt.Type, obj, ptr, captures[1:], snap)
 			applyNestedRecipes(pt.Type, obj, recipes, all, extraCur, snap)
-			return "&" + renderDynamicValue(pt.Type, obj, ptr, v.RuntimeType, snap.read, 0)
+			return "&" + renderDynamicValue(pt.Type, obj, ptr, v.RuntimeType, snap.read, 0, opts)
 		}
 		return fmt.Sprintf("0x%x", ptr)
 	}
@@ -132,14 +147,21 @@ func renderAuto(v *Value, data []LeafData, cur *int, all []LeafData, extraCur *i
 	if st, ok := t.(*dwarf.StructType); ok && !isString(st) && !isSlice(st) && !isInterface(st) {
 		header = scatterWords(v.Type, header)
 		consumeRegCaptures(v.Type, header, captures, snap)
-		return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0)
+		return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0, opts)
 	}
 
 	if st, ok := t.(*dwarf.StructType); ok && isString(st) {
 		if len(captures) > 0 {
 			snap.put(readUint(header), captures[0])
 		}
-		return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0)
+		return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0, opts)
+	}
+
+	if st, ok := t.(*dwarf.StructType); ok && isSlice(st) {
+		if len(captures) > 0 {
+			snap.put(readUint(header), captures[0])
+		}
+		return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0, opts)
 	}
 
 	if st, ok := t.(*dwarf.StructType); ok && isInterface(st) {
@@ -147,10 +169,10 @@ func renderAuto(v *Value, data []LeafData, cur *int, all []LeafData, extraCur *i
 		if len(header) >= 16 {
 			applyRecipeExtras(readUint(header), readUint(header[8:]), all, extraCur, recipes, snap)
 		}
-		return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0)
+		return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0, opts)
 	}
 
-	return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0)
+	return renderDynamicValue(v.Type, header, 0, v.RuntimeType, snap.read, 0, opts)
 }
 
 func bindIfaceCaptures(header []byte, captures []LeafData, snap *memSnapshot) {
@@ -228,12 +250,24 @@ func applyNestedRecipes(t dwarf.Type, mem []byte, recipes map[uint64][]RelRule, 
 	}
 }
 
+// concatLeaves joins ABI-word leaves into a contiguous header. BPF stores
+// every leaf in a MAX_DATA_SIZE (64-byte) slot; only the first 8 bytes of a
+// register/word fetch are the value. Using the whole slot would make slice
+// len/cap and the interface data word read as the previous leaf's padding.
 func concatLeaves(leaves []LeafData) []byte {
 	var b []byte
 	for _, l := range leaves {
-		b = append(b, l.Data...)
+		b = append(b, wordBytes(l)...)
 	}
 	return b
+}
+
+func wordBytes(leaf LeafData) []byte {
+	n := 8
+	if len(leaf.Data) < n {
+		n = len(leaf.Data)
+	}
+	return leaf.Data[:n]
 }
 
 type snapChunk struct {
@@ -284,7 +318,13 @@ func consumeMemCaptures(t dwarf.Type, mem []byte, addr uint64, captures []LeafDa
 		}
 		return captures[1:]
 	case isSlice(st):
-		return captures
+		if len(captures) == 0 {
+			return captures
+		}
+		if len(mem) >= 8 {
+			snap.put(readUint(mem), captures[0])
+		}
+		return captures[1:]
 	case isInterface(st):
 		need := 2
 		if interfaceIsNonEmpty(st) {
@@ -338,7 +378,13 @@ func consumeRegCaptures(t dwarf.Type, img []byte, captures []LeafData, snap *mem
 		}
 		return captures[1:]
 	case isSlice(st):
-		return captures
+		if len(captures) == 0 {
+			return captures
+		}
+		if len(img) >= 8 {
+			snap.put(readUint(img), captures[0])
+		}
+		return captures[1:]
 	case isInterface(st):
 		bindIfaceCaptures(img, captures, snap)
 		if len(captures) >= 1 {
@@ -456,7 +502,7 @@ func objectBytes(t dwarf.Type, data []byte, addr uint64, readMemory memoryReader
 	return data
 }
 
-func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runtimeTypeResolver, readMemory memoryReader, depth int) string {
+func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runtimeTypeResolver, readMemory memoryReader, depth int, opts RenderOpts) string {
 	if depth >= maxDynamicDepth {
 		return "<max-depth>"
 	}
@@ -476,7 +522,7 @@ func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runt
 		if err := readMemory(ptr, buf); err != nil {
 			return typeName(tt) + "(<unavailable>)"
 		}
-		return "&" + renderDynamicValue(tt.Type, buf, ptr, resolveType, readMemory, depth+1)
+		return "&" + renderDynamicValue(tt.Type, buf, ptr, resolveType, readMemory, depth+1, opts)
 	case *dwarf.StructType:
 		switch {
 		case isString(tt):
@@ -510,9 +556,14 @@ func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runt
 			if len(data) < 24 {
 				return tt.StructName + "(<unavailable>)"
 			}
-			return fmt.Sprintf("%s(len=%d, cap=%d)", tt.StructName,
-				int64(binary.LittleEndian.Uint64(data[8:16])),
-				int64(binary.LittleEndian.Uint64(data[16:24])))
+			arrAddr := readUint(data)
+			slen := int64(binary.LittleEndian.Uint64(data[8:16]))
+			scap := int64(binary.LittleEndian.Uint64(data[16:24]))
+			payload := renderSlicePayload(tt, arrAddr, slen, readMemory)
+			if payload == "" {
+				return fmt.Sprintf("%s(len=%d, cap=%d)", tt.StructName, slen, scap)
+			}
+			return fmt.Sprintf("%s(len=%d, cap=%d, %s)", tt.StructName, slen, scap, payload)
 		case isInterface(tt):
 			if len(data) < 16 {
 				return "interface{type=<unknown>, value=<unavailable>}"
@@ -541,9 +592,12 @@ func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runt
 				return "interface{type=<unknown>, value=<unavailable>}"
 			}
 			if typeIsDirect(dynamicType) {
+				if _, isPtr := underlying(dynamicType).(*dwarf.PtrType); isPtr && dataAddr == 0 {
+					return "(" + typeName(dynamicType) + ")(nil)"
+				}
 				var word [8]byte
 				binary.LittleEndian.PutUint64(word[:], dataAddr)
-				return renderDynamicValue(dynamicType, word[:], dataAddr, resolveType, readMemory, depth+1)
+				return renderDynamicValue(dynamicType, word[:], dataAddr, resolveType, readMemory, depth+1, opts)
 			}
 			size := int(dynamicType.Size())
 			if size <= 0 || size > maxReadSize {
@@ -553,19 +607,24 @@ func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runt
 			if len(value) == 0 {
 				return typeName(dynamicType) + "(<unavailable>)"
 			}
-			return renderDynamicValue(dynamicType, value, dataAddr, resolveType, readMemory, depth+1)
+			return renderDynamicValue(dynamicType, value, dataAddr, resolveType, readMemory, depth+1, opts)
 		default:
 			data = objectBytes(tt, data, addr, readMemory)
 			var b strings.Builder
 			b.WriteString(tt.StructName)
 			b.WriteByte('{')
-			for i, f := range tt.Field {
-				if i > 0 {
+			printed := 0
+			for _, f := range tt.Field {
+				if opts.HideUnexported && !token.IsExported(f.Name) {
+					continue
+				}
+				if printed > 0 {
 					b.WriteString(", ")
 				}
+				printed++
 				b.WriteString(f.Name)
 				b.WriteByte(':')
-				b.WriteString(renderStructField(f, data, addr, resolveType, readMemory, depth+1))
+				b.WriteString(renderStructField(f, data, addr, resolveType, readMemory, depth+1, opts))
 			}
 			b.WriteByte('}')
 			return b.String()
@@ -579,7 +638,7 @@ func renderDynamicValue(t dwarf.Type, data []byte, addr uint64, resolveType runt
 	}
 }
 
-func renderStructField(f *dwarf.StructField, data []byte, addr uint64, resolveType runtimeTypeResolver, readMemory memoryReader, depth int) string {
+func renderStructField(f *dwarf.StructField, data []byte, addr uint64, resolveType runtimeTypeResolver, readMemory memoryReader, depth int, opts RenderOpts) string {
 	start := int(f.ByteOffset)
 	if start < 0 {
 		return "<unavailable>"
@@ -598,7 +657,50 @@ func renderStructField(f *dwarf.StructField, data []byte, addr uint64, resolveTy
 	if len(fieldData) == 0 {
 		return "<unavailable>"
 	}
-	return renderDynamicValue(f.Type, fieldData, addr+uint64(f.ByteOffset), resolveType, readMemory, depth)
+	return renderDynamicValue(f.Type, fieldData, addr+uint64(f.ByteOffset), resolveType, readMemory, depth, opts)
+}
+
+func renderSlicePayload(st *dwarf.StructType, addr uint64, length int64, readMemory memoryReader) string {
+	if length <= 0 || addr == 0 || readMemory == nil || !isByteElemSlice(st) {
+		return ""
+	}
+	n := length
+	truncated := false
+	if n > autoStringSize {
+		n = autoStringSize
+		truncated = true
+	}
+	buf := make([]byte, n)
+	if err := readMemory(addr, buf); err != nil {
+		return ""
+	}
+	q := strconv.Quote(string(buf))
+	if truncated {
+		q = q[:len(q)-1] + "...\""
+	}
+	return q
+}
+
+func isByteElemSlice(st *dwarf.StructType) bool {
+	switch st.StructName {
+	case "[]uint8", "[]byte", "[]int8":
+		return true
+	}
+	if len(st.Field) == 0 || st.Field[0] == nil || st.Field[0].Type == nil {
+		return false
+	}
+	elem := underlying(st.Field[0].Type)
+	if pt, ok := elem.(*dwarf.PtrType); ok {
+		elem = underlying(pt.Type)
+	}
+	if elem == nil || elem.Size() != 1 {
+		return false
+	}
+	switch elem.(type) {
+	case *dwarf.UintType, *dwarf.UcharType, *dwarf.IntType, *dwarf.CharType:
+		return true
+	}
+	return false
 }
 
 func interfaceIsNonEmpty(st *dwarf.StructType) bool {

@@ -35,10 +35,11 @@ type Config struct {
 	excludeVendor   bool
 
 	// args/rets fetch rules
-	fargs         []string
-	frets         []string
-	autoFetchArgs bool
-	autoFetchRets bool
+	fargs          []string
+	frets          []string
+	autoFetchArgs  bool
+	autoFetchRets  bool
+	hideUnexported bool
 
 	// aggregate
 	aggregate         bool
@@ -280,6 +281,7 @@ requireConfirm:
 	if err != nil {
 		return
 	}
+	mgr.SetHideUnexported(t.cfg.hideUnexported)
 	mgr.SetTypeLearner(func(addr uint64, typ dwarf.Type) error {
 		return t.bpf.SetTypeRecipe(addr, uprobe.CompileTypeRecipe(typ))
 	})
