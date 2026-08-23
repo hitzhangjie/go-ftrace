@@ -49,8 +49,8 @@ ps: 你可以在启动被测试程序 ./main 之前或者之后启动 ftrace，�
 自动提取**默认开启**。ftrace 读 DWARF、编译抓取规则，在 uprobe 命中当下拷贝，再打印成接近 Go 的结构化值。常见类型（整数、布尔、字符串、切片、结构体指针、接口）不需要 `--fargs` / `--frets`。
 
 先编译 fixture（`make -C testdata`）。下面用 `testdata/args`、`testdata/rets`。
-单元测试编译的是 [`testdata/auto`](./testdata/auto)，同一份程序还覆盖
-`error`、`fmt.Stringer`、`proto.Message`：
+
+单元测试编译的是 [`testdata/auto`](./testdata/auto)，同一份程序还覆盖`error`、`fmt.Stringer`、`proto.Message`：
 
 ```bash
 sudo ftrace -u 'main.add' ./testdata/args/main
@@ -115,8 +115,7 @@ make install
 
 ## 非 root 用户
 
-如果希望非 root 用户（无需 sudo）也能运行，请使用 `make install`，它会完成普通用户
-运行所需的提权设置（软链、属主、setuid）：
+如果希望非 root 用户（无需 sudo）也能运行，请使用 `make install`，它会完成普通用户运行所需的提权设置（软链、属主、setuid）：
 
 ```bash
 make install
@@ -200,8 +199,24 @@ sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main
 
 # 致谢
 
-该项目fork自 [jschwinger233/gofuncgraph](https://github.com/jschwinger233/gofuncgraph), 在此基础上做了一些优化、bugfix相关的工作来改善工具的易用性、健壮性。
+本仓库 fork 自 [jschwinger233/gofuncgraph](https://github.com/jschwinger233/gofuncgraph)。原作者用 eBPF uprobe 走出了「对运行中的 Go 进程做 function-graph 跟踪」这条路，这是后续一切工作的起点。感谢原作者的贡献。
 
-感谢原作者的贡献!
+原实现更接近一份原理验证：Go程序也能挂上探针、打出调用树，但还达不到普通 Go 开发人员真正能上手、用在真实服务上的程度。制约可用性的主要是这几件事：
 
-ps：如果你对C/C++/Rust/Python相关的ftrace工具感兴趣的话，可以了解下 [namhyung/uftrace](https://github.com/namhyung/uftrace)，如果你对内核的ftrace工具感兴趣，可以了解下 [kernel ftrace](https://www.kernel.org/doc/html/v4.17/trace/ftrace.html)。
+- **参数怎么抓。** 必须手写 fetch rule，规则本身依赖 Go 寄存器 ABI 和结构体内存布局（`(%ax)`、`+16(%ax)`、`offsets.py`）。写错就静默抓错字节；绝大多数开发人员不会、也不该去写这种规则。
+- **高频命中时的内存。** uprobe 一旦打在热点路径上，事件生产远快于用户态消费，未闭合调用会无限积压，观测进程（甚至同机其他进程）可能被 OOM。
+- **正确性。** 参数取值存在真实的 bug（地址算错、探针返回后再读堆、entry/ret 错配等）。输出不可信，就没法拿来排查。
+
+本仓库在这条路上做了大量工程化，目标是让普通 Go 开发人员「选几个函数就能看调用树、参数和耗时」：
+
+- **默认自动提取。** 从 DWARF 和 Go amd64 ABI 编译 fetch 计划，探针命中当下拷贝快照，打印成接近 Go 的结构化值。常见类型不必再手写 `--fargs` / `--frets`。
+- **高频场景可活。** 按完整根调用做自适应采样，并对未闭合事件、PID、返回值候选设上限，用 `--memory-limit` 约束 go-ftrace 自身堆占用，避免热点 uprobe 把观测进程打爆。
+- **正确性与隔离。** 探针时取值、按 PID 隔离 goid、pid namespace 下的 PID 编号、接口具体类型的后续补齐，保证输出能对上真实调用。
+- **日常能用。** aggregate 聚合、非 root 安装、下钻过滤、结构化返回值（含 `error` / `proto.Message`），都是为了能直接用在真实 Go 服务上。
+
+手写规则仍然保留，但只作为 auto 太吵或不覆盖某种布局时的逃生口。
+
+# 相关工具
+
+- [namhyung/uftrace](https://github.com/namhyung/uftrace)：面向 C/C++/Rust/Python
+- [kernel ftrace](https://www.kernel.org/doc/html/v4.17/trace/ftrace.html)：内核 ftrace

@@ -35,15 +35,11 @@ A small nested-call demo lives in [`examples/`](./examples). Build it with
 
 ## Fetch arguments and return values (automatic, default)
 
-Auto fetching is **on by default**. ftrace reads DWARF, compiles fetch rules,
-copies values when the uprobe fires, and prints them as Go-like structured
-values. You do not need `--fargs` / `--frets` for common types (integers,
-bools, strings, slices, pointers to structs, interfaces).
+Auto fetching is **on by default**. ftrace reads DWARF, compiles fetch rules, copies values when the uprobe fires, and prints them as Go-like structured values. You do not need `--fargs` / `--frets` for common types (integers, bools, strings, slices, pointers to structs, interfaces).
 
-Build the fixtures once (`make -C testdata`). The commands below use
-`testdata/args` and `testdata/rets`. The unit tests compile
-[`testdata/auto`](./testdata/auto), which also covers `error`,
-`fmt.Stringer`, and `proto.Message`. Then:
+Build the fixtures once (`make -C testdata`). The commands below use `testdata/args` and `testdata/rets`. The unit tests compile[`testdata/auto`](./testdata/auto), which also covers `error`,`fmt.Stringer`, and `proto.Message`. 
+
+Then:
 
 ```bash
 sudo ftrace -u 'main.add' ./testdata/args/main
@@ -76,19 +72,13 @@ sudo ftrace -u 'main.send' ./testdata/rets/main
 22 12:25:22.1226 000.0000  } main.send+282 => ret0=&main.MeshError{Code:500, Detail:&errors.errorString{s:"send failed"}} testdata/rets/main.go:119
 ```
 
-`--fargs-auto` / `--frets-auto` can be turned off independently. A nil `error`
-prints as `nil`. The first hit of a new interface concrete type may show
-`<unavailable>` for nested bytes (the string inside `error`); the same type
-is captured in full on later hits. `--hide-unexported` (off by default) omits
-unexported struct fields, which is useful for generated types such as
-`proto.Message`. Details: [Auto-fetch design](./docs/AutoFetch.zh_CN.md).
+`--fargs-auto` / `--frets-auto` can be turned off independently. A nil `error`prints as `nil`. The first hit of a new interface concrete type may show`<unavailable>` for nested bytes (the string inside `error`); the same type is captured in full on later hits. `--hide-unexported` (off by default) omits unexported struct fields, which is useful for generated types such as`proto.Message`. Details: [Auto-fetch design](./docs/AutoFetch.zh_CN.md).
 
 ## Manual fetch rules (optional)
 
-Hand-written `--fargs` / `--frets` are for when auto is too noisy: you only
-want one field, cleaner aggregate histograms, or a layout auto does not
-cover. Any `--fargs` on the command line turns off entry auto for the whole
-run; any `--frets` turns off return auto.
+Hand-written `--fargs` / `--frets` are for when auto is too noisy: you only want one field, cleaner aggregate histograms, or a layout auto does not cover. 
+
+Any `--fargs` on the command line turns off entry auto for the whole run; any `--frets` turns off return auto.
 
 ```bash
 sudo ftrace -u 'main.add' ./testdata/args/main \
@@ -121,18 +111,15 @@ make install
 
 ## As a non-root user
 
-To run `ftrace` without `sudo`, use `make install`, which performs the
-privilege setup (symlink, ownership, setuid) required for regular users:
+To run `ftrace` without `sudo`, use `make install`, which performs the privilege setup (symlink, ownership, setuid) required for regular users:
 
 ```bash
 make install
 ```
 
-Alternatively, apply those settings manually as described in
-[INSTALLATION.md](./INSTALLATION.md).
+Alternatively, apply those settings manually as described in [INSTALLATION.md](./INSTALLATION.md).
 
-> See [INSTALLATION.md](./INSTALLATION.md) for details and the rationale behind
-> the privilege-related setup.
+> See [INSTALLATION.md](./INSTALLATION.md) for details and the rationale behind the privilege-related setup.
 
 # Use cases
 
@@ -182,7 +169,7 @@ The output shows:
 22 12:31:44.0081               main.add1(a=1, b=2) { main.add+151 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:33
 22 12:31:44.1083                 main.add2(a=1, b=2) { main.add1+165 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:40
 22 12:31:44.3087                   main.add3(a=1, b=2) { main.add2+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:48
-                              
+                            
                                   ⏱️ Latency stacks up as each frame returns
 22 12:31:44.6092 000.3005          } main.add3+175 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:55
 22 12:31:44.6092 000.5009        } main.add2+57 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:48
@@ -209,11 +196,26 @@ If you're interested in the implmention internals, please read: [go-ftrace inter
 
 # Acknowledgments
 
-This repo is forked from [jschwinger233/gofuncgraph](https://github.com/jschwinger233/gofuncgraph), with some modifications to improve usability and fix the bugs of fetching arguments.
+This repository is forked from [jschwinger233/gofuncgraph](https://github.com/jschwinger233/gofuncgraph). The original work showed that eBPF uprobes can reconstruct a function-graph trace of a live Go process. That idea is the starting point; thank you to the original author.
 
-Thanks for the original work!
+The upstream tree was closer to a proof of concept. It could attach probes to a go program and print a call tree, but it was not yet something an ordinary Go developer could pick up and use on a real service. A few gaps blocked that:
 
-ps：if you want to know more about go-ftrace alternatives to C, C++, Rust and Python, or kernel ftrace tool, you can see:
+- **Fetch rules.** Arguments had to be described by hand (`(%ax)`, `+16(%ax)`, `offsets.py`). The syntax assumes the Go register ABI and struct layout. A wrong rule silently fetches the wrong bytes; most developers should not have to write these rules at all.
+- **Memory under a hot uprobe.** A frequently hit probe produces events faster than userspace can consume them. Unclosed stacks grew without bound and could OOM the tracer — or the machine.
+- **Correctness.** Argument capture had real bugs (wrong addresses, reading heap after the probe returned, mismatched entry/return events). Unreliable output is not usable for debugging.
+
+This fork is the engineering to close those gaps: select a few functions and see the call tree, arguments, and latency.
+
+- **Auto-fetch by default.** DWARF plus the Go amd64 ABI compile the fetch plan; the uprobe copies a snapshot at hit time and userspace prints Go-like structured values. Common types no longer need `--fargs` / `--frets`.
+- **Survives hot paths.** Adaptive sampling admits whole root calls, with hard caps on pending events, PIDs, and return-value candidates. `--memory-limit` bounds the tracer's own heap so a hot uprobe cannot run the observer out of memory.
+- **Correctness and isolation.** Probe-time copies, PID-scoped goroutine state, namespaced PIDs, and follow-up capture of interface concrete types keep the output aligned with the real call.
+- **Day-to-day usage.** Aggregate histograms, non-root install, drill-down filters, and structured returns (including `error` and `proto.Message`) are there so the tool can sit on a real Go service.
+
+Hand-written rules remain as an escape hatch when auto is too noisy or does not cover a layout.
+
+# Related tools
+
+If you want to know more about go-ftrace alternatives to C, C++, Rust and Python, or kernel ftrace tool, you can see:
 
 - [namhyung/uftrace](https://github.com/namhyung/uftrace), https://github.com/namhyung/uftrace
 - [kernel ftrace](https://www.kernel.org/doc/html/v4.17/trace/ftrace.html), https://www.kernel.org/doc/html/v4.17/trace/ftrace.html
