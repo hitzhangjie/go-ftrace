@@ -5,7 +5,7 @@ GO ?= go1.22.2
 # symbols and attach uprobes. See README.md for details.
 BUILD_FLAGS := -gcflags 'all=-N -l' -ldflags '-linkmode=external -extldflags=-no-pie'
 
-FIXTURES := basic args rets
+FIXTURES := basic args rets auto
 
 all: $(FIXTURES)
 
@@ -18,7 +18,10 @@ args:
 rets:
 	cd rets && $(GO) build $(BUILD_FLAGS) -o main main.go
 
+auto:
+	cd auto && $(GO) build $(BUILD_FLAGS) -o main .
+
 clean:
-	rm -f basic/main args/main rets/main
+	rm -f basic/main args/main rets/main auto/main
 
 .PHONY: all $(FIXTURES) clean

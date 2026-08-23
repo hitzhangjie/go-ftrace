@@ -11,11 +11,10 @@ go-ftrace is an bpf(2)-based ftrace(1)-like function graph tracer for Golang pro
 
 # Usage
 
-`examples` provide two examples to show how to use go-ftrace.
+A small nested-call demo lives in [`examples/`](./examples). Build it with
+`make -C examples`, then:
 
 ## Trace functions
-
-Check `examples/trace_funcs`, try following tracing tests:
 
 ```
   example: trace a specific function: "main.add":
@@ -41,7 +40,10 @@ copies values when the uprobe fires, and prints them as Go-like structured
 values. You do not need `--fargs` / `--frets` for common types (integers,
 bools, strings, slices, pointers to structs, interfaces).
 
-Build the fixtures once (`make -C testdata`), then:
+Build the fixtures once (`make -C testdata`). The commands below use
+`testdata/args` and `testdata/rets`. The unit tests compile
+[`testdata/auto`](./testdata/auto), which also covers `error`,
+`fmt.Stringer`, and `proto.Message`. Then:
 
 ```bash
 sudo ftrace -u 'main.add' ./testdata/args/main
@@ -99,9 +101,10 @@ sudo ftrace -u 'main.add' ./testdata/args/main \
 ```
 
 Rule syntax: [FetchArgRule.md](./docs/FetchArgRule.md). Ready-made examples:
-[FetchArgExamples.md](./docs/FetchArgExamples.md).
+[FetchArgExamples.md](./docs/FetchArgExamples.md). More usage notes live under
+[`docs/`](./docs).
 
-> `Makefile`s under `examples/` and `testdata/` let you `make <target>` quickly.
+> `make -C examples` and `make -C testdata` build the demo and fixtures.
 > Tracing can start before or after `./main`; both work.
 
 # Installation
@@ -136,7 +139,7 @@ Alternatively, apply those settings manually as described in
 - Wall time profiling;
 - Execution flow observing;
 
-Here's an example when tracing `examples/trace_funcs/main.go`, here's the code snippet:
+Here's an example when tracing `examples/main.go`, here's the code snippet:
 
 ```go
 func main() {
@@ -174,28 +177,28 @@ The output shows:
 
 ```text
                            🔬 Nested calls: who called whom, args, and return values
-22 12:31:44.0081           main.doSomething() { main.main+31 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:16
-22 12:31:44.0081             main.add(a=1, b=2) { main.doSomething+37 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:21
-22 12:31:44.0081               main.add1(a=1, b=2) { main.add+151 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:33
-22 12:31:44.1083                 main.add2(a=1, b=2) { main.add1+165 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:40
-22 12:31:44.3087                   main.add3(a=1, b=2) { main.add2+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:48
-                                
+22 12:31:44.0081           main.doSomething() { main.main+31 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:16
+22 12:31:44.0081             main.add(a=1, b=2) { main.doSomething+37 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:21
+22 12:31:44.0081               main.add1(a=1, b=2) { main.add+151 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:33
+22 12:31:44.1083                 main.add2(a=1, b=2) { main.add1+165 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:40
+22 12:31:44.3087                   main.add3(a=1, b=2) { main.add2+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:48
+                              
                                   ⏱️ Latency stacks up as each frame returns
-22 12:31:44.6092 000.3005          } main.add3+175 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:55
-22 12:31:44.6092 000.5009        } main.add2+57 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:48
-22 12:31:44.6092 000.6011      } main.add1+170 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:40
-22 12:31:44.6092 000.6011    } main.add+156 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:33
-22 12:31:44.6092             main.minus(a=1, b=2) { main.doSomething+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:22
-22 12:31:44.6594 000.0502    } main.minus+55 => ret0=-1 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:61
+22 12:31:44.6092 000.3005          } main.add3+175 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:55
+22 12:31:44.6092 000.5009        } main.add2+57 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:48
+22 12:31:44.6092 000.6011      } main.add1+170 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:40
+22 12:31:44.6092 000.6011    } main.add+156 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:33
+22 12:31:44.6092             main.minus(a=1, b=2) { main.doSomething+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:22
+22 12:31:44.6594 000.0502    } main.minus+55 => ret0=-1 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:61
 
                             🔍 Receiver reconstructed from DWARF (*Student in AX)
 22 12:31:44.6594             main.(*Student).String(s=&main.Student{name:"zhang", age:100}) { fmt.(*pp).handleMethods+756 /opt/go/src/fmt/print.go:674
-22 12:31:44.6695 000.0101    } main.(*Student).String+156 => ret0="" /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:75
-22 12:31:45.6699 001.6618  } main.doSomething+172 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:28
+22 12:31:44.6695 000.0101    } main.(*Student).String+156 => ret0="" /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:75
+22 12:31:45.6699 001.6618  } main.doSomething+172 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:28
 
                            🧵 Same binary, another goroutine (the loop in main)
-22 12:31:45.8854           main.add3(a=1, b=1) { main.main.func1+37 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:12
-22 12:31:46.1860 000.3006  } main.add3+175 => ret0=2 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:55
+22 12:31:45.8854           main.add3(a=1, b=1) { main.main.func1+37 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:12
+22 12:31:46.1860 000.3006  } main.add3+175 => ret0=2 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:55
 ```
 
 Hand-write `--fargs` / `--frets` only if you want a subset of fields (for example a smaller aggregate histogram).

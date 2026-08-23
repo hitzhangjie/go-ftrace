@@ -1,8 +1,9 @@
 # Fetch Rule Examples
 
 This document collects ready-to-use `--fargs` / `--frets` rules for the common
-Go argument / return-value conventions, distilled from the fixtures under
-[`testdata/`](../testdata). For the full syntax explanation, see
+Go argument / return-value conventions, distilled from [`testdata/args`](../testdata/args)
+and [`testdata/rets`](../testdata/rets). Automatic DWARF fetch is tested against
+[`testdata/auto`](../testdata/auto). For the full syntax explanation, see
 [FetchArgRule.md](./FetchArgRule.md).
 
 ## Syntax reminder

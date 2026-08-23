@@ -10,7 +10,8 @@ go-ftrace 是一个基于Linux bpf(2) 的类似内核工具 ftrace(1) 的函数�
 
 # 使用方式
 
-项目中提供了测试程序（`examples/trace_funcs`、`testdata/args`、`testdata/rets`），可以执行如下几种测试来了解 go-ftrace 的使用。
+项目在 [`examples/`](./examples) 下提供了一个嵌套调用的演示程序（`make -C examples`），
+可以执行如下几种测试来了解 go-ftrace 的使用。
 
 跟踪函数：
 
@@ -39,7 +40,7 @@ sudo ftrace -c --memory-limit 256 -u 'main.hotPath' ./main
 
 自适应采样与内存背压对**所有模式**（包括非 aggregate 的逐条打印）生效：事件按完整根调用采样，而不是独立丢弃入口/返回事件；它每秒依据实际 Go 堆占用动态调整采样率，并对未闭合事件、PID 数、返回值重频候选设置固定上限，防止高频命中时 go-ftrace 自身内存无限增长。`--memory-limit` 即该内存目标，`--adaptive-sample=false` 可关闭动态采样（始终采集每个根调用）。aggregate 与普通模式的差异只在输出形式（按函数聚合汇总 vs 逐条打印调用栈）。结束（或 Ctrl+C）时统计会显示采样跳过数、队列溢出丢失数、异常中止数和被丢弃的调用样本数；aggregate 的每项聚合结果同时显示实际计数 `counted` 与按采样率推算的量级估算 `estimated`。估算值使用样本准入时的采样分母做逆概率加权；队列溢出丢失的事件具有相关性，只单独报告而不强行计入估算，因此结果不应视为无损审计数据。该参数约束的是 go-ftrace 自身的数据结构和采样目标，不等同于操作系统级 RSS/cgroup 硬限制。
 
-示例目录下同时提供了一个 `examples/Makefile`, 你也可以执行 `make <target>` 来快速执行对应的命令（对应上面示例）来进行测试.
+想了解更多用法（自动提取、手写 fetch 规则、采样等）请看 [`docs/`](./docs)。
 
 ps: 你可以在启动被测试程序 ./main 之前或者之后启动 ftrace，两种方式都可以正常工作，这主要是跟ebpf程序的加载、触发机制有关。
 
@@ -47,7 +48,9 @@ ps: 你可以在启动被测试程序 ./main 之前或者之后启动 ftrace，�
 
 自动提取**默认开启**。ftrace 读 DWARF、编译抓取规则，在 uprobe 命中当下拷贝，再打印成接近 Go 的结构化值。常见类型（整数、布尔、字符串、切片、结构体指针、接口）不需要 `--fargs` / `--frets`。
 
-先编译 fixture（`make -C testdata`）：
+先编译 fixture（`make -C testdata`）。下面用 `testdata/args`、`testdata/rets`。
+单元测试编译的是 [`testdata/auto`](./testdata/auto)，同一份程序还覆盖
+`error`、`fmt.Stringer`、`proto.Message`：
 
 ```bash
 sudo ftrace -u 'main.add' ./testdata/args/main
@@ -96,7 +99,7 @@ sudo ftrace -u 'main.add' ./testdata/args/main \
 22 12:27:15.0151 000.0000  } main.add+38 => ret0=3 testdata/args/main.go:47
 ```
 
-规则语法见 [FetchArgRule.zh_CN.md](./docs/FetchArgRule.zh_CN.md)，现成例子见 [FetchArgExamples.zh_CN.md](./docs/FetchArgExamples.zh_CN.md)。
+规则语法见 [FetchArgRule.zh_CN.md](./docs/FetchArgRule.zh_CN.md)，现成例子见 [FetchArgExamples.zh_CN.md](./docs/FetchArgExamples.zh_CN.md)。更多用法见 [`docs/`](./docs)。
 
 # 安装方法
 
@@ -127,7 +130,7 @@ make install
 
 你可以将其用于go程序的函数调用关系的跟踪，以及耗时相关的统计观测。
 
-以下面的示例代码为例（详见 `examples/trace_funcs/main.go`），说明下工具的使用、执行效果：
+以下面的示例代码为例（详见 `examples/main.go`），说明下工具的使用、执行效果：
 
 ```go
 func main() {
@@ -165,28 +168,28 @@ sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main
 
 ```text
                            🔬 嵌套调用：谁调用了谁，以及每一层的参数和返回值
-22 12:31:44.0081           main.doSomething() { main.main+31 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:16
-22 12:31:44.0081             main.add(a=1, b=2) { main.doSomething+37 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:21
-22 12:31:44.0081               main.add1(a=1, b=2) { main.add+151 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:33
-22 12:31:44.1083                 main.add2(a=1, b=2) { main.add1+165 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:40
-22 12:31:44.3087                   main.add3(a=1, b=2) { main.add2+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:48
+22 12:31:44.0081           main.doSomething() { main.main+31 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:16
+22 12:31:44.0081             main.add(a=1, b=2) { main.doSomething+37 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:21
+22 12:31:44.0081               main.add1(a=1, b=2) { main.add+151 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:33
+22 12:31:44.1083                 main.add2(a=1, b=2) { main.add1+165 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:40
+22 12:31:44.3087                   main.add3(a=1, b=2) { main.add2+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:48
 
                                  ⏱️ 每一层返回时打出耗时，会沿着调用栈往上累加
-22 12:31:44.6092 000.3005          } main.add3+175 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:55
-22 12:31:44.6092 000.5009        } main.add2+57 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:48
-22 12:31:44.6092 000.6011      } main.add1+170 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:40
-22 12:31:44.6092 000.6011    } main.add+156 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:33
-22 12:31:44.6092             main.minus(a=1, b=2) { main.doSomething+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:22
-22 12:31:44.6594 000.0502    } main.minus+55 => ret0=-1 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:61
+22 12:31:44.6092 000.3005          } main.add3+175 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:55
+22 12:31:44.6092 000.5009        } main.add2+57 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:48
+22 12:31:44.6092 000.6011      } main.add1+170 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:40
+22 12:31:44.6092 000.6011    } main.add+156 => ret0=3 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:33
+22 12:31:44.6092             main.minus(a=1, b=2) { main.doSomething+52 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:22
+22 12:31:44.6594 000.0502    } main.minus+55 => ret0=-1 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:61
 
                             🔍 接收者由 DWARF 自动推导（*Student 在 AX，展开成结构体）
 22 12:31:44.6594             main.(*Student).String(s=&main.Student{name:"zhang", age:100}) { fmt.(*pp).handleMethods+756 /opt/go/src/fmt/print.go:674
-22 12:31:44.6695 000.0101    } main.(*Student).String+156 => ret0="" /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:75
-22 12:31:45.6699 001.6618  } main.doSomething+172 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:28
+22 12:31:44.6695 000.0101    } main.(*Student).String+156 => ret0="" /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:75
+22 12:31:45.6699 001.6618  } main.doSomething+172 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:28
 
                            🧵 同一二进制里另一个 goroutine（main 里那段循环）
-22 12:31:45.8854           main.add3(a=1, b=1) { main.main.func1+37 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:12
-22 12:31:46.1860 000.3006  } main.add3+175 => ret0=2 /home/zhangjie/hitzhangjie/go-ftrace/examples/trace_funcs/main.go:55
+22 12:31:45.8854           main.add3(a=1, b=1) { main.main.func1+37 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:12
+22 12:31:46.1860 000.3006  } main.add3+175 => ret0=2 /home/zhangjie/hitzhangjie/go-ftrace/examples/main.go:55
 ```
 
 只有在你只关心某几个字段（例如让聚合直方图更干净）时，才需要手写 `--fargs` / `--frets`。

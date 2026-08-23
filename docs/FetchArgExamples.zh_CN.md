@@ -1,7 +1,9 @@
 # Fetch 规则示例
 
 本文汇总了常见 Go 参数 / 返回值约定下可直接使用的 `--fargs` / `--frets` 规则，
-内容提炼自 [`testdata/`](../testdata) 下的测试程序。完整语法说明见
+内容提炼自 [`testdata/args`](../testdata/args) 与
+[`testdata/rets`](../testdata/rets)。自动提取（DWARF）的测试程序见
+[`testdata/auto`](../testdata/auto)。完整语法说明见
 [FetchArgRule.zh_CN.md](./FetchArgRule.zh_CN.md)。
 
 ## 语法速记
