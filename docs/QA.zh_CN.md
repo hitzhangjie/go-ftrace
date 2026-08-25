@@ -4,6 +4,14 @@
 
 不是 uprobe 没抓到返回值，也不是 ftrace 和被观测进程不在同一个 namespace。BPF helper `bpf_get_current_pid_tgid()` 给出的是 init pid namespace 的 TGID，用户态 `process_vm_readv` 却按当前 ns 的 PID 查找，两套编号在 WSL2（systemd 嵌套 pid ns）里对不上。完整排查、内核细节和修复见 [BPF 事件 PID 与 pid namespace](./BpfPidNamespace.zh_CN.md)。
 
+### 为什么在 5.4 内核上会报 `unknown func bpf_get_ns_current_pid_tgid`？
+
+`bpf_get_ns_current_pid_tgid` 是 Linux 5.8 才加入的 BPF helper。5.4 验证器只要看到 `call 120` 就会拒绝加载，即使 C 里有 `if` 回退——验证器会走两条分支。加载时会探测该 helper：新内核继续用它拿 namespaced PID（WSL2/容器需要）；旧内核在加载前把这条 call 改掉，回退到 `bpf_get_current_pid_tgid`。详见 [BPF 事件 PID 与 pid namespace](./BpfPidNamespace.zh_CN.md) 第 8 节。需要重新编译安装 **ftrace 自身**（不是 `examples/main`）。
+
+### 为什么 5.4 上还会报 `math between map_value pointer and register with unbounded min value is not allowed`？
+
+这是过了 unknown helper 之后，5.4 验证器的下一关。`event` 在 per-CPU map 里，`e->args[e->arg_count]` 是对 map 值的变址；helper 调用后验证器会丢掉偏移的下界。接口 recipe 先抓到栈上，再用常量下标写回 `args[0..7]`。见 `internal/bpf/ftrace.c` 里的 `load_arg_word` / `store_arg`。
+
 ### 为什么 `ftrace -u` 使用通配符而不是正则表达式？
 
 如果你频繁使用它，正则表达式并不像通配符那样方便。例如，如果存在 `main.fn1, main.fn2, main.fn3` 这几个函数，你想把它们全部跟踪，你可能会更喜欢 `-u main.fn*` 而不是 `-u main.fn.*`。

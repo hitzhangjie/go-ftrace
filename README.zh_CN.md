@@ -4,9 +4,11 @@ go-ftrace 是一个基于Linux bpf(2) 的类似内核工具 ftrace(1) 的函数�
 
 **限制: 因为设计实现的原因，当前go-ftrace只支持满足如下限制条件的go程序跟踪、统计：**
 
-- Linux内核：支持 bpf(2) 和 uprobe 的Linux内核
+- Linux内核：需要 bpf(2)、uprobe 和 `BPF_MAP_TYPE_QUEUE`。namespaced PID 在加载时探测，内核提供 `bpf_get_ns_current_pid_tgid`（上游 5.8，部分发行版会 backport）则使用，否则回退到 `bpf_get_current_pid_tgid`。
 - 处理器架构: x86-64架构（little-endian字节序）
 - 二进制程序：只能是go ELF可执行程序（非PIE模式），未剔除符号表.symtab，未剔除调试信息.(z)debug_info，
+
+**已测内核：** Linux 5.4（偏保守/企业发行版）和 Linux 6.6（WSL2）。同一套 ftrace 二进制即可；缺失的 helper 和更严的验证器在加载时处理。更早的内核不是硬性下限，只是尚未测试。能否加载取决于实际 BPF helper 和验证器，发行版常常 backport 这些能力而不改 `uname`。
 
 # 使用方式
 
@@ -211,7 +213,7 @@ sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main
 
 - **默认自动提取。** 从 DWARF 和 Go amd64 ABI 编译 fetch 计划，探针命中当下拷贝快照，打印成接近 Go 的结构化值。常见类型不必再手写 `--fargs` / `--frets`。
 - **高频场景可活。** 按完整根调用做自适应采样，并对未闭合事件、PID、返回值候选设上限，用 `--memory-limit` 约束 go-ftrace 自身堆占用，避免热点 uprobe 把观测进程打爆。
-- **正确性与隔离。** 探针时取值、按 PID 隔离 goid、pid namespace 下的 PID 编号、接口具体类型的后续补齐，保证输出能对上真实调用。
+- **正确性与隔离。** 探针时取值、按 PID 隔离 goid、pid namespace 下的 PID 编号（Linux 5.8+ helper，旧内核自动回退）、接口具体类型的后续补齐，保证输出能对上真实调用。
 - **日常能用。** aggregate 聚合、非 root 安装、下钻过滤、结构化返回值（含 `error` / `proto.Message`），都是为了能直接用在真实 Go 服务上。
 
 手写规则仍然保留，但只作为 auto 太吵或不覆盖某种布局时的逃生口。

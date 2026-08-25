@@ -18,7 +18,7 @@ import (
 var usage = `go-ftrace is bpf(2)-based ftrace(1)-like function graph tracer for Go! 
 
 for now, only support following cases:
-- OS: Linux, with support for bpf(2) and uprobe
+- OS: Linux, with bpf(2), uprobe, and BPF_MAP_TYPE_QUEUE
 - Arch: x86-64 little endian
 - Binary: go ELF executable, non-stripped, built with non-PIE mode,
           ELF sections .symtab, .(z)debug_info are required

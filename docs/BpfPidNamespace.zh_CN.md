@@ -145,3 +145,37 @@ return bpf_get_current_pid_tgid() >> 32;
 - uprobe 按 inode 挂载，**不会**按 PID 过滤。同一二进制的其他进程实例也会出事件。若某个实例与 ftrace 不在同一 pid ns，helper 会回退到 init-ns PID，对该实例的 `process_vm_readv` 仍可能 `ESRCH`。这是挂载模型的既有行为，不是本次回归。
 - Auto 模式用户态不再为参数值做 `process_vm_readv`。静态字段和字符串在探针时按 FetchArg 拷贝；接口动态值第一次可能只有前缀，学会 `_type` 的相对规则之后才在后续命中时拷全。见 [Auto 模式原理](./AutoFetch.zh_CN.md)。
 - DirectIface 标志的字节位置随 Go 版本变化（1.25 及以前在 Kind `+23`，1.26 起在 TFlag `+20`）。这与 pid namespace 是独立问题；当前渲染器两处都检查。
+
+## 8. 5.4 与 5.8+：为什么 C 里的 if 不够，以及如何自动选择 helper
+
+`bpf_get_ns_current_pid_tgid` 是 **Linux 5.8** 加入的（helper ID 120）。公司里常见的 5.4 内核没有这个函数。加载 BPF 时验证器会报：
+
+```text
+unknown func bpf_get_ns_current_pid_tgid
+```
+
+§5 里 `get_pid()` 的 C 层 fallback **不能**单独当兼容层。`CONFIG.pidns_dev` 来自 `.rodata` map，5.4 验证器把 map load 当成未知值，**两条分支都验证**。只要指令流里还有 `call 120`，即使用户态把 `pidns_dev` 写成 0，程序也加载不上去。
+
+因此加载路径是：
+
+```mermaid
+flowchart TD
+  load[Load BPF] --> probe["features.HaveProgramHelper Kprobe FnGetNsCurrentPidTgid"]
+  probe -->|err == nil 内核大于等于 5.8 或已backport| useNs["保留 call 120 namespaced TGID"]
+  probe -->|ErrNotSupported 如 5.4| rewrite["把 Call 120 改成 r0 = -1"]
+  rewrite --> fallback["走现有 bpf_get_current_pid_tgid"]
+  rewrite --> nested{"NSpid 是否多层"}
+  nested -->|是 WSL/容器| warn["警告: 旧内核无法翻译 PID"]
+  nested -->|否 典型 VM| ok["init ns 与可见 PID 一致"]
+  useNs --> attach[LoadAndAssign]
+  fallback --> attach
+```
+
+1. 用 cilium/ebpf 的 `features.HaveProgramHelper` 向内核探测该 helper（不看 `uname`，避免发行版 backport / WSL 版本字符串误导）。
+2. helper 存在（5.8+ 或已 backport）：保留 `call 120`，事件 PID 是 ftrace 所在 pid ns 里的 TGID。WSL2 和普通云主机都能用；init ns 与当前 ns 相同时，两种 helper 返回值相同。
+3. helper 不存在（如 5.4）：在 `LoadAndAssign` 之前把字节码里的 `call 120` 改成 `r0 = -1`。C 里 `!helper() && ns.tgid` 失败，落到 `bpf_get_current_pid_tgid() >> 32`。
+4. 若探测失败但结论不是「不支持」（例如 `EPERM`），不改字节码，按原程序加载，避免把权限问题误判成 helper 缺失。
+
+嵌套 pid ns 只用于告警，不参与 helper 选择。检测看 `/proc/self/status` 的 `NSpid:`：字段多于 1 个就是嵌套（WSL2 systemd、容器）。**不要**比较 `/proc/self/ns/pid` 和 `/proc/1/ns/pid`——WSL2 里 PID 1 是发行版 systemd，和 ftrace 同 ns。
+
+旧内核 + 嵌套 ns 没有完整修复：没有 helper 就把 init-ns TGID 译成当前 ns 编号。此时会打一条 warning；典型 5.4 云主机 `NSpid` 只有一层，不会误报。

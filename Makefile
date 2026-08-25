@@ -1,6 +1,6 @@
 # Warn: To load an ebpf program into the kernel requires special privileges,
 # so the binary is installed to /usr/sbin owned by root with the setuid bit.
-GO ?= go1.22.2
+GO ?= go
 
 build: internal/bpf/goftrace_bpfel_x86.go internal/bpf/goftrace_bpfel_x86.o
 	cd cmd/ftrace && $(GO) build -v

@@ -113,6 +113,7 @@ func (b *BPF) Load(uprobes []uprobe.Uprobe, opts LoadOptions) (err error) {
 	if err = spec.RewriteConstants(map[string]interface{}{"CONFIG": cfg}); err != nil {
 		return
 	}
+	selectPidHelper(spec)
 	if err = spec.LoadAndAssign(b.objs, &ebpf.CollectionOptions{
 		Programs: ebpf.ProgramOptions{LogSize: ebpf.DefaultVerifierLogSize * 4},
 	}); err != nil {

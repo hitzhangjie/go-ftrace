@@ -350,6 +350,50 @@ static __always_inline void fetch_args_from_reg(struct pt_regs *ctx, struct arg_
 	read_reg(ctx, rule->reg, (__u64 *)&data->data);
 }
 
+// 5.4 verifier rejects map_value + unbounded offset, and forgets spilled
+// bounds across helper calls. Index event.args[] only with a constant, via
+// these if-chains (a switch is often compiled back into a variable GEP).
+static __always_inline void load_arg_word(struct event *e, __u8 idx, __u64 *out)
+{
+	*out = 0;
+	if (idx == 0)
+		bpf_probe_read_kernel(out, sizeof(*out), e->args[0].data);
+	else if (idx == 1)
+		bpf_probe_read_kernel(out, sizeof(*out), e->args[1].data);
+	else if (idx == 2)
+		bpf_probe_read_kernel(out, sizeof(*out), e->args[2].data);
+	else if (idx == 3)
+		bpf_probe_read_kernel(out, sizeof(*out), e->args[3].data);
+	else if (idx == 4)
+		bpf_probe_read_kernel(out, sizeof(*out), e->args[4].data);
+	else if (idx == 5)
+		bpf_probe_read_kernel(out, sizeof(*out), e->args[5].data);
+	else if (idx == 6)
+		bpf_probe_read_kernel(out, sizeof(*out), e->args[6].data);
+	else if (idx == 7)
+		bpf_probe_read_kernel(out, sizeof(*out), e->args[7].data);
+}
+
+static __always_inline void store_arg(struct event *e, __u8 idx, const struct arg_data *src)
+{
+	if (idx == 0)
+		__builtin_memcpy(&e->args[0], src, sizeof(*src));
+	else if (idx == 1)
+		__builtin_memcpy(&e->args[1], src, sizeof(*src));
+	else if (idx == 2)
+		__builtin_memcpy(&e->args[2], src, sizeof(*src));
+	else if (idx == 3)
+		__builtin_memcpy(&e->args[3], src, sizeof(*src));
+	else if (idx == 4)
+		__builtin_memcpy(&e->args[4], src, sizeof(*src));
+	else if (idx == 5)
+		__builtin_memcpy(&e->args[5], src, sizeof(*src));
+	else if (idx == 6)
+		__builtin_memcpy(&e->args[6], src, sizeof(*src));
+	else if (idx == 7)
+		__builtin_memcpy(&e->args[7], src, sizeof(*src));
+}
+
 static __always_inline void fetch_args_from_memory(struct pt_regs *ctx, struct arg_data *data, struct arg_rule *rule)
 {
 	// first read the address from register (well, it maybe a immediate value)
@@ -365,9 +409,13 @@ static __always_inline void fetch_args_from_memory(struct pt_regs *ctx, struct a
 		return;
 	}
 
-	// then do other addressing rules
-	for (int i = 0; i < 8 && i < rule->length; i++)
+	// then do other addressing rules. Bound the loop by the constant 8 so
+	// clang unrolls and offsets[i] stays a constant map_value offset.
+#pragma unroll
+	for (int i = 0; i < 8; i++)
 	{
+		if (i >= rule->length)
+			break;
 		// if expr = *+8(+2(%eax)), for *+8 part, we need to dereference the address
 		if (rule->dereference[i] == 1)
 		{
@@ -386,9 +434,12 @@ static __always_inline void fetch_args_from_memory(struct pt_regs *ctx, struct a
 
 	// finally, we got the EA (effective address), then read the data from it,
 	// make sure the data size is not larger than MAX_DATA_SIZE
-	if (bpf_probe_read_user(&data->data,
-						rule->size < MAX_DATA_SIZE ? rule->size : MAX_DATA_SIZE,
-						(void *)addr) != 0)
+	__u32 size = rule->size;
+	if (size > MAX_DATA_SIZE)
+		size = MAX_DATA_SIZE;
+	if (size == 0)
+		return;
+	if (bpf_probe_read_user(&data->data, size, (void *)addr) != 0)
 		data->read_error = 1;
 }
 
@@ -400,8 +451,11 @@ static __always_inline void fetch_from_base(__u64 addr, struct rel_rule *rule, s
 		data->is_nil = 1;
 		return;
 	}
-	for (int i = 0; i < 8 && i < rule->length; i++)
+#pragma unroll
+	for (int i = 0; i < 8; i++)
 	{
+		if (i >= rule->length)
+			break;
 		if (rule->dereference[i] == 1)
 		{
 			if (bpf_probe_read_user(&addr, sizeof(addr), (void *)addr + rule->offsets[i]) != 0)
@@ -415,16 +469,37 @@ static __always_inline void fetch_from_base(__u64 addr, struct rel_rule *rule, s
 			addr += rule->offsets[i];
 		}
 	}
-	if (bpf_probe_read_user(&data->data,
-						rule->size < MAX_DATA_SIZE ? rule->size : MAX_DATA_SIZE,
-						(void *)addr) != 0)
+	__u32 size = rule->size;
+	if (size > MAX_DATA_SIZE)
+		size = MAX_DATA_SIZE;
+	if (size == 0)
+		return;
+	if (bpf_probe_read_user(&data->data, size, (void *)addr) != 0)
 		data->read_error = 1;
+}
+
+static __always_inline struct rel_rule *recipe_rule(struct type_recipe *rec, int j)
+{
+	if (j == 0)
+		return &rec->rules[0];
+	if (j == 1)
+		return &rec->rules[1];
+	if (j == 2)
+		return &rec->rules[2];
+	if (j == 3)
+		return &rec->rules[3];
+	return 0;
 }
 
 static __always_inline void apply_type_recipes(struct event *e, struct arg_rules *rules)
 {
-	for (int i = 0; i < 8 && i < rules->length; i++)
+	struct arg_data tmp;
+
+#pragma unroll
+	for (int i = 0; i < 8; i++)
 	{
+		if (i >= rules->length)
+			break;
 		if (!rules->rules[i].iface_data)
 			continue;
 		__u8 tidx = rules->rules[i].type_idx;
@@ -432,17 +507,27 @@ static __always_inline void apply_type_recipes(struct event *e, struct arg_rules
 			continue;
 		__u64 type_addr = 0;
 		__u64 data_ptr = 0;
-		bpf_probe_read_kernel(&type_addr, sizeof(type_addr), e->args[tidx].data);
-		bpf_probe_read_kernel(&data_ptr, sizeof(data_ptr), e->args[i].data);
+		load_arg_word(e, tidx, &type_addr);
+		load_arg_word(e, i, &data_ptr);
 		if (type_addr == 0)
 			continue;
 		struct type_recipe *rec = bpf_map_lookup_elem(&type_recipes_map, &type_addr);
 		if (!rec)
 			continue;
-		for (int j = 0; j < 4 && j < rec->length && e->arg_count < 8; j++)
+#pragma unroll
+		for (int j = 0; j < 4; j++)
 		{
-			fetch_from_base(data_ptr, &rec->rules[j], &e->args[e->arg_count]);
-			e->arg_count++;
+			if (j >= rec->length)
+				break;
+			if (e->arg_count >= 8)
+				break;
+			struct rel_rule *rr = recipe_rule(rec, j);
+			if (!rr)
+				break;
+			__u8 dst = e->arg_count;
+			fetch_from_base(data_ptr, rr, &tmp);
+			store_arg(e, dst, &tmp);
+			e->arg_count = dst + 1;
 		}
 	}
 }
@@ -456,8 +541,13 @@ static __always_inline void fetch_args(struct pt_regs *ctx, struct event *e)
 		return;
 
 	e->arg_count = rules->length;
-	for (int i = 0; i < 8 && i < rules->length; i++)
+	if (e->arg_count > 8)
+		e->arg_count = 8;
+#pragma unroll
+	for (int i = 0; i < 8; i++)
 	{
+		if (i >= rules->length)
+			break;
 		struct arg_data *data = &e->args[i];
 		__builtin_memset(data, 0, sizeof(*data));
 		switch (rules->rules[i].type)

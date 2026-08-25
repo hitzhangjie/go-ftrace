@@ -4,10 +4,12 @@ go-ftrace is an bpf(2)-based ftrace(1)-like function graph tracer for Golang pro
 
 **Limits: for now, only support following cases**
 
-- OS: Linux, with support for bpf(2) and uprobe
+- OS: Linux with bpf(2), uprobe, and `BPF_MAP_TYPE_QUEUE`. Namespaced PIDs use `bpf_get_ns_current_pid_tgid` when the kernel provides it (upstream 5.8; some distros backport), otherwise `bpf_get_current_pid_tgid`.
 - Arch: x86-64 little endian
 - Binary: go ELF executable, non-stripped, built with non-PIE mode,
   ELF sections .symtab, .(z)debug_info are required
+
+**Tested kernels:** Linux 5.4 (conservative / enterprise-style) and Linux 6.6 (WSL2). The same ftrace binary is used; missing helpers and stricter verifiers are handled at load time. Earlier kernels are not a hard cutoff — they are simply untested. Load success depends on the actual BPF helpers and verifier, which distros often backport without bumping `uname`.
 
 # Usage
 
@@ -208,7 +210,7 @@ This fork is the engineering to close those gaps: select a few functions and see
 
 - **Auto-fetch by default.** DWARF plus the Go amd64 ABI compile the fetch plan; the uprobe copies a snapshot at hit time and userspace prints Go-like structured values. Common types no longer need `--fargs` / `--frets`.
 - **Survives hot paths.** Adaptive sampling admits whole root calls, with hard caps on pending events, PIDs, and return-value candidates. `--memory-limit` bounds the tracer's own heap so a hot uprobe cannot run the observer out of memory.
-- **Correctness and isolation.** Probe-time copies, PID-scoped goroutine state, namespaced PIDs, and follow-up capture of interface concrete types keep the output aligned with the real call.
+- **Correctness and isolation.** Probe-time copies, PID-scoped goroutine state, namespaced PIDs (Linux 5.8+ helper, automatic fallback on older kernels), and follow-up capture of interface concrete types keep the output aligned with the real call.
 - **Day-to-day usage.** Aggregate histograms, non-root install, drill-down filters, and structured returns (including `error` and `proto.Message`) are there so the tool can sit on a real Go service.
 
 Hand-written rules remain as an escape hatch when auto is too noisy or does not cover a layout.

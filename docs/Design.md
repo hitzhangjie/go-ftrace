@@ -284,7 +284,7 @@ nil `error`（itab 为 0）的 type 规则也必须 `NilCheck`，否则会读地
 - `ARG_RULE_REG`：从 `pt_regs` 直接读取指定寄存器；
 - `ARG_RULE_MEMORY`：以寄存器值为基址，逐步执行“加偏移”或“解引用”，最后用 `bpf_probe_read_user` 读取目标内存。
 
-每个叶子形成一条 `arg_data`，包含数据、nil 标记和读取失败标记。所有叶子与事件头一起在 per-CPU `event_buffer` 中组装为完整 `event`，随后整体压入 `event_queue`，避免事件与参数在独立队列中发生错配。
+每个叶子形成一条 `arg_data`，包含数据、nil 标记和读取失败标记。所有叶子与事件头一起在 per-CPU `event_buffer` 中组装为完整 `event`，随后整体压入 `event_queue`，避免事件与参数在独立队列中发生错配。Linux 5.4 验证器不允许对 map 值做变址（`e->args[e->arg_count]`），helper 调用后还会丢掉偏移下界，因此接口 recipe 先写到栈上，再用常量下标拷回 `args[0..7]`。
 
 ## 7. 获取 goroutine ID
 
@@ -306,7 +306,7 @@ bpf_get_current_task()
 
 随后 `bpf.Load` 通过 `spec.RewriteConstants` 把它们写入 eBPF 的只读 `CONFIG`。
 
-进程 ID 优先取 `bpf_get_ns_current_pid_tgid(ftrace 的 pid ns)` 返回的 TGID，这样用户态 `process_vm_readv` / `/proc/<pid>` 能在 WSL2（systemd 嵌套 pid namespace）或容器里解析到同一个进程。该 helper 不可用时回退到 `bpf_get_current_pid_tgid()` 的高 32 位（init namespace TGID）。因为 goid 只在单个进程内有意义，所有跟踪状态都必须使用 `(pid, goid)` 而不是单独使用 goid。WSL2 上接口返回值显示 `<unavailable>` 的排查过程见 [BPF 事件 PID 与 pid namespace](./BpfPidNamespace.zh_CN.md)。
+进程 ID 优先取 `bpf_get_ns_current_pid_tgid(ftrace 的 pid ns)` 返回的 TGID，这样用户态 `process_vm_readv` / `/proc/<pid>` 能在 WSL2（systemd 嵌套 pid namespace）或容器里解析到同一个进程。该 helper 是 Linux 5.8 加入的；加载时用 `features.HaveProgramHelper` 探测，缺失则在 `LoadAndAssign` 之前把 `call 120` 改成 `r0 = -1`，让 C 里已有的 `bpf_get_current_pid_tgid() >> 32` 回退生效（仅改 CONFIG 不够：5.4 验证器仍会验证 unknown helper）。嵌套 pid ns 只用于告警（看 `/proc/self/status` 的 `NSpid`）。因为 goid 只在单个进程内有意义，所有跟踪状态都必须使用 `(pid, goid)` 而不是单独使用 goid。WSL2 上接口返回值显示 `<unavailable>` 的排查过程见 [BPF 事件 PID 与 pid namespace](./BpfPidNamespace.zh_CN.md)。
 
 ## 8. eBPF 程序与状态机
 
@@ -505,7 +505,7 @@ sequenceDiagram
 
 当前 CLI 明确限定：
 
-- Linux，内核具备项目使用的 eBPF、uprobe、`BPF_MAP_TYPE_QUEUE` 及相关 helper 能力；
+- Linux，内核具备项目使用的 eBPF、uprobe、`BPF_MAP_TYPE_QUEUE` 及相关 helper 能力；`bpf_get_ns_current_pid_tgid` 在加载时探测，不可用则回退到 `bpf_get_current_pid_tgid`。已在 Linux 5.4 与 6.6 上验证同一套二进制；更早内核未测，能否运行以加载时的 helper/验证器为准（发行版常 backport，不能只看 `uname`）；
 - x86-64 little-endian；
 - Go ELF 可执行文件；
 - 非 PIE；
