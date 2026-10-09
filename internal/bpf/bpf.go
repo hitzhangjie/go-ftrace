@@ -282,7 +282,11 @@ func (b *BPF) Attach(bin string, uprobes []uprobe.Uprobe) (err error) {
 			prog = b.objs.GoroutineExit
 		}
 		fmt.Printf("attaching %d/%d\r", i+1, len(uprobes))
-		up, err := ex.Uprobe("", prog, &link.UprobeOptions{Offset: up.AbsOffset})
+		// Address (not Offset): AbsOffset is already the absolute file offset of
+		// the probe point, not a displacement from a symbol. Passing it as Offset
+		// with an empty symbol makes cilium/ebpf resolve "" in the symbol table,
+		// which fails with "symbol : not found" since v0.11.0.
+		up, err := ex.Uprobe("", prog, &link.UprobeOptions{Address: up.AbsOffset})
 		if err != nil {
 			return err
 		}
