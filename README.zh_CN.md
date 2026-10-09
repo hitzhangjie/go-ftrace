@@ -37,10 +37,10 @@ go-ftrace 是一个基于Linux bpf(2) 的类似内核工具 ftrace(1) 的函数�
 高频函数建议使用 aggregate 模式，并设置 go-ftrace 的堆内存目标：
 
 ```bash
-sudo ftrace -c --memory-limit 256 -u 'main.hotPath' ./main
+sudo ftrace -c --sample --sample-budget 256 -u 'main.hotPath' ./main
 ```
 
-自适应采样与内存背压对**所有模式**（包括非 aggregate 的逐条打印）生效：事件按完整根调用采样，而不是独立丢弃入口/返回事件；它每秒依据实际 Go 堆占用动态调整采样率，并对未闭合事件、PID 数、返回值重频候选设置固定上限，防止高频命中时 go-ftrace 自身内存无限增长。`--memory-limit` 即该内存目标，`--adaptive-sample=false` 可关闭动态采样（始终采集每个根调用）。aggregate 与普通模式的差异只在输出形式（按函数聚合汇总 vs 逐条打印调用栈）。结束（或 Ctrl+C）时统计会显示采样跳过数、队列溢出丢失数、异常中止数和被丢弃的调用样本数；aggregate 的每项聚合结果同时显示实际计数 `counted` 与按采样率推算的量级估算 `estimated`。估算值使用样本准入时的采样分母做逆概率加权；队列溢出丢失的事件具有相关性，只单独报告而不强行计入估算，因此结果不应视为无损审计数据。该参数约束的是 go-ftrace 自身的数据结构和采样目标，不等同于操作系统级 RSS/cgroup 硬限制。
+自适应采样与内存背压默认关闭，需用 `--sample=true` 显式开启；开启后对**所有模式**（包括非 aggregate 的逐条打印）生效：事件按完整根调用采样，而不是独立丢弃入口/返回事件；它每秒依据实际 Go 堆占用动态调整采样率，并对未闭合事件、PID 数、返回值重频候选设置固定上限，防止高频命中时 go-ftrace 自身内存无限增长。`--sample-budget` 即该内存目标；默认（`--sample=false`）始终采集每个根调用。aggregate 与普通模式的差异只在输出形式（按函数聚合汇总 vs 逐条打印调用栈）。结束（或 Ctrl+C）时统计会显示采样跳过数、队列溢出丢失数、异常中止数和被丢弃的调用样本数；aggregate 的每项聚合结果同时显示实际计数 `counted` 与按采样率推算的量级估算 `estimated`。估算值使用样本准入时的采样分母做逆概率加权；队列溢出丢失的事件具有相关性，只单独报告而不强行计入估算，因此结果不应视为无损审计数据。该参数约束的是 go-ftrace 自身的数据结构和采样目标，不等同于操作系统级 RSS/cgroup 硬限制。
 
 想了解更多用法（自动提取、手写 fetch 规则、采样等）请看 [`docs/`](./docs)。
 
@@ -212,7 +212,7 @@ sudo ftrace -u 'main.*' -u 'fmt.Print*' ./main
 本仓库在这条路上做了大量工程化，目标是让普通 Go 开发人员「选几个函数就能看调用树、参数和耗时」：
 
 - **默认自动提取。** 从 DWARF 和 Go amd64 ABI 编译 fetch 计划，探针命中当下拷贝快照，打印成接近 Go 的结构化值。常见类型不必再手写 `--fargs` / `--frets`。
-- **高频场景可活。** 按完整根调用做自适应采样，并对未闭合事件、PID、返回值候选设上限，用 `--memory-limit` 约束 go-ftrace 自身堆占用，避免热点 uprobe 把观测进程打爆。
+- **高频场景可活。** 按完整根调用做自适应采样，并对未闭合事件、PID、返回值候选设上限，用 `--sample-budget` 约束 go-ftrace 自身堆占用，避免热点 uprobe 把观测进程打爆。
 - **正确性与隔离。** 探针时取值、按 PID 隔离 goid、pid namespace 下的 PID 编号（Linux 5.8+ helper，旧内核自动回退）、接口具体类型的后续补齐，保证输出能对上真实调用。
 - **日常能用。** aggregate 聚合、非 root 安装、下钻过滤、结构化返回值（含 `error` / `proto.Message`），都是为了能直接用在真实 Go 服务上。
 

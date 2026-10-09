@@ -209,7 +209,7 @@ The upstream tree was closer to a proof of concept. It could attach probes to a 
 This fork is the engineering to close those gaps: select a few functions and see the call tree, arguments, and latency.
 
 - **Auto-fetch by default.** DWARF plus the Go amd64 ABI compile the fetch plan; the uprobe copies a snapshot at hit time and userspace prints Go-like structured values. Common types no longer need `--fargs` / `--frets`.
-- **Survives hot paths.** Adaptive sampling admits whole root calls, with hard caps on pending events, PIDs, and return-value candidates. `--memory-limit` bounds the tracer's own heap so a hot uprobe cannot run the observer out of memory.
+- **Survives hot paths.** Opt-in adaptive sampling (`--sample=true`) admits whole root calls, with hard caps on pending events, PIDs, and return-value candidates. `--sample-budget` bounds the tracer's own heap so a hot uprobe cannot run the observer out of memory.
 - **Correctness and isolation.** Probe-time copies, PID-scoped goroutine state, namespaced PIDs (Linux 5.8+ helper, automatic fallback on older kernels), and follow-up capture of interface concrete types keep the output aligned with the real call.
 - **Day-to-day usage.** Aggregate histograms, non-root install, drill-down filters, and structured returns (including `error` and `proto.Message`) are there so the tool can sit on a real Go service.
 

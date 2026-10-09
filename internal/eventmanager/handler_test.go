@@ -275,7 +275,7 @@ func TestNonAggregateAdaptiveBackpressure(t *testing.T) {
 }
 
 func TestAggregateCloseStackWithoutAdaptiveUsesStackDepth(t *testing.T) {
-	// With --adaptive-sample=false the BPF side never emits TRACE_END, so
+	// With --sample=false the BPF side never emits TRACE_END, so
 	// aggregate mode must fall back to the stack-depth check: the aggregate is
 	// produced when the root call's stack unwinds back to zero.
 	m := &EventManager{

@@ -37,7 +37,7 @@ type sampler interface {
 // adaptiveSampler adjusts the sampling denominator from two backpressure
 // signals combined by taking the more aggressive target:
 //
-//   - heap pressure (--memory-limit target): the denominator rises
+//   - heap pressure (--sample-budget target): the denominator rises
 //     aggressively as HeapAlloc approaches the configured limit;
 //   - queue loss (event_queue full): when the BPF side drops events because
 //     the userspace consumer cannot keep up, the denominator is raised so that
@@ -148,7 +148,7 @@ func (s *adaptiveSampler) active() bool {
 	return true
 }
 
-// noopSampler is used when --adaptive-sample=false: every root call is
+// noopSampler is used when --sample=false: every root call is
 // collected and the denominator stays 1 forever, so adjust never reports a
 // change and nothing is ever written to the BPF sample-config map.
 type noopSampler struct{}

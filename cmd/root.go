@@ -92,8 +92,8 @@ var rootCmd = &cobra.Command{
 
 		aggregate, _ := cmd.Flags().GetBool("aggregate")
 		aggregateInterval, _ := cmd.Flags().GetDuration("aggregate-interval")
-		memoryLimitMB, _ := cmd.Flags().GetUint64("memory-limit")
-		adaptiveSample, _ := cmd.Flags().GetBool("adaptive-sample")
+		memoryLimitMB, _ := cmd.Flags().GetUint64("sample-budget")
+		adaptiveSample, _ := cmd.Flags().GetBool("sample")
 
 		// positional fetch rules are kept for backward compatibility and are
 		// treated as entry argument fetch rules
@@ -164,10 +164,10 @@ func init() {
 	rootCmd.Flags().BoolP("fargs-auto", "A", true, "derive entry-argument rules from DWARF when no --fargs is given")
 	rootCmd.Flags().BoolP("frets-auto", "R", true, "derive return-value rules from DWARF when no --frets is given")
 	rootCmd.Flags().Bool("hide-unexported", false, "omit unexported struct fields when printing auto-fetched values")
-	rootCmd.Flags().Bool("aggregate", false, "aggregate per-function latency and top-10 return values instead of printing every call")
+	rootCmd.Flags().Bool("aggregate", false, "aggregate per-function latency and top-10 return values instead of every call")
 	rootCmd.Flags().Duration("aggregate-interval", 3*time.Second, "interval for periodic aggregate summary; 0 prints only on exit")
-	rootCmd.Flags().Uint64("memory-limit", 256, "Go heap target (MiB) for adaptive backpressure")
-	rootCmd.Flags().Bool("adaptive-sample", true, "dynamically reduce sampling near --memory-limit; false collects every root call")
+	rootCmd.Flags().Uint64("sample-budget", 256, "Go heap budget (MiB) for adaptive sampling; only used with --sample")
+	rootCmd.Flags().Bool("sample", false, "opt in to adaptive sampling that lowers the root-call rate near --sample-budget")
 
 	rootCmd.MarkFlagRequired("uprobe-wildcards")
 }
